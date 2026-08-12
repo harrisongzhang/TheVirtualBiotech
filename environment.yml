@@ -1,0 +1,58 @@
+name: vbt
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.11
+  # Core scientific stack
+  - numpy=1.26.3
+  - pandas=2.3.3
+  - scipy=1.12.0
+  - scikit-learn=1.8.0
+  - statsmodels=0.14.6
+  - matplotlib=3.10.8
+  - seaborn=0.13.2
+  # Single-cell analysis
+  - anndata=0.12.7
+  - scanpy=1.11.5
+  - h5py=3.15.1
+  - harmonypy=0.2.0
+  - loompy=3.0.8
+  # Cell Ontology parsing
+  - pronto=2.6.0
+  # Visualization
+  - pycirclize=1.10.1
+  - pillow=12.1.0
+  # R integration (mixed-effects models)
+  - rpy2=3.6.4
+  - r-base=4.4.3
+  - r-lme4=1.1_38
+  - r-lmertest=3.2_1
+  # CELLxGENE Census (cross-disease survey)
+  - cellxgene-census=1.17.0
+  # MCP data dependencies
+  - pyarrow=20.0.0
+  - requests=2.32.5
+  - pip
+  - pip:
+    # Bioinformatics utilities (adjusttext dep not on conda-forge; use pip)
+    - bioinfokit==2.1.3
+    # TF activity inference
+    - decoupler==2.1.4
+    # Cell-cell communication
+    - liana==1.7.0
+    # Survival analysis (B7-H3 case study)
+    - lifelines==0.30.3
+    # MCP server framework
+    - fastmcp==3.2.0
+    - mcp==1.26.0
+    # cBioPortal API client (clinicaltrials_mcp)
+    - pybioportal==1.0.0
+    # Agent framework
+    - anthropic==0.86.0
+    - claude-agent-sdk==0.1.69
+    # Web UI + runtime deps for the app/CLI
+    - gradio==6.10.0
+    - python-dotenv==1.2.2
+    - httpx==0.28.1

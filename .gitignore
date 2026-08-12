@@ -1,0 +1,96 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# Environment files
+.env
+.env.local
+
+# Machine-specific activation override (see activate.sh)
+activate.local.sh
+
+# MCP config is generated per-machine by setup_mcp.py (absolute interpreter/paths)
+mcp_config.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Knowledge Base generated
+knowledge_base/index.db
+knowledge_base/index.db-journal
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large data files
+*.h5ad
+*.h5
+*.hdf5
+*.parquet
+
+# Workspace / session outputs (generated)
+workspace/
+web_workspace/
+casestudy_workspace/
+sessions/
+
+# Claude config / SDK scratch
+.claude.json*
+debug/
+shell-snapshots/
+todos/
+plans/
+projects/
+session-env/
+file-history/
+history.jsonl
+stats-cache.json
+statsig/
+telemetry/
+
+# Auth tokens
+.gxl_tokens.json
+
+# Backup files
+*.bak_*
+
+# Run outputs (regenerable; rebuild the index with ./run.sh index)
+runs/
+audits/

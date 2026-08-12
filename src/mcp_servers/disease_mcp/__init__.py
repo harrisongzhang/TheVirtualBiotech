@@ -1,0 +1,1 @@
+"""Disease MCP Server"""

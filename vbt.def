@@ -1,0 +1,78 @@
+# Apptainer definition file for TheVirtualBiotech
+#
+# Build:
+#
+#   apptainer build vbt.sif vbt.def
+#
+# Runtime usage with project source bind-mounted. Use `exec`, not `run`: the
+# %runscript below *is* the environment's interpreter, so `run ... python x.py`
+# would hand it "python" as the script name.
+#
+#   apptainer exec \
+#     --bind /path/to/project:/workspace \
+#     --bind /path/to/data:/data \
+#     --pwd /workspace \
+#     vbt.sif python run.py
+
+Bootstrap: docker
+From: ubuntu:22.04
+
+%labels
+    Description "TheVirtualBiotech multi-agent drug discovery system"
+
+%environment
+    export PATH=/opt/conda/envs/vbt/bin:/opt/conda/bin:/usr/local/bin:$PATH
+    export CONDA_DEFAULT_ENV=vbt
+    export MAMBA_ROOT_PREFIX=/opt/conda
+    # Suppress .pyc writes and __pycache__ churn on bind-mounted source dirs
+    export PYTHONDONTWRITEBYTECODE=1
+
+%files
+    # Copies environment.yml from the directory where `apptainer build` is run
+    environment.yml /environment.yml
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    export MAMBA_ROOT_PREFIX=/opt/conda
+    export PATH=/opt/conda/bin:/usr/local/bin:$PATH
+
+    # ── System packages ────────────────────────────────────────────────────────
+    apt-get update && apt-get install -y --no-install-recommends \
+        wget curl git ca-certificates \
+        build-essential pkg-config \
+        libxml2-dev libssl-dev libffi-dev \
+        libgl1-mesa-glx libglib2.0-0 \
+        && rm -rf /var/lib/apt/lists/*
+
+    # ── micromamba ─────────────────────────────────────────────────────────────
+    mkdir -p /opt/conda
+    curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
+        | tar -xvj -C /usr/local/bin --strip-components=1 bin/micromamba
+
+    # ── Conda environment ──────────────────────────────────────────────────────
+    micromamba env create \
+        --prefix /opt/conda/envs/vbt \
+        --file /environment.yml \
+        --yes
+
+    # ── Cleanup ────────────────────────────────────────────────────────────────
+    micromamba clean --all --yes
+    /opt/conda/envs/vbt/bin/pip cache purge
+    rm /environment.yml
+
+%runscript
+    # Default: run the python interpreter from the conda env.
+    # Source code is expected to be bind-mounted at runtime (see usage above).
+    exec /opt/conda/envs/vbt/bin/python "$@"
+
+%test
+    /opt/conda/envs/vbt/bin/python - <<'EOF'
+import anthropic, scanpy, fastmcp, pandas, pyarrow
+import anndata, cellxgene_census, pybioportal
+print(f"anthropic      {anthropic.__version__}")
+print(f"scanpy         {scanpy.__version__}")
+print(f"fastmcp        {fastmcp.__version__}")
+print(f"pandas         {pandas.__version__}")
+print(f"pyarrow        {pyarrow.__version__}")
+print("All core imports OK")
+EOF
