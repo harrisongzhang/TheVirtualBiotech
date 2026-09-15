@@ -2719,10 +2719,14 @@ def main(share: bool = False):
     print("=" * 70)
 
     demo, custom_css, force_light_mode_js, theme = create_interface(authenticated_by_server=True)
-    demo.queue(
-        default_concurrency_limit=20,  # Allow 20 concurrent users (matches max_sessions)
-        max_size=50  # Max queue size (waiting users)
-    )
+    if share:
+        # Preserve the shared launch's original queue defaults (one active event).
+        demo.queue()
+    else:
+        demo.queue(
+            default_concurrency_limit=20,  # Allow 20 concurrent users (matches max_sessions)
+            max_size=50  # Max queue size (waiting users)
+        )
 
     demo.launch(
         server_name=server_host,

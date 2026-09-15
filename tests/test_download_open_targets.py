@@ -295,6 +295,84 @@ class InventoryAndManifestTests(unittest.TestCase):
             manifest = json.loads((Path(directory) / ".download-manifest.json").read_text())
             self.assertFalse(manifest["complete"])
             self.assertEqual(manifest["expected_files"], 50)
+            self.assertEqual(manifest["files"], {})
+
+    def test_worker_finishing_during_interrupt_is_reused_on_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = ("disease/ready.parquet", "disease/pending.parquet")
+            files = [(name, archive.BASE + name) for name in names]
+            data = parquet_bytes()
+            checksum_started = threading.Event()
+            context = {}
+            original_download, original_checksum = archive.download, archive.checksum
+
+            def download(root, name, url, previous, stop):
+                context["stop"] = stop
+                return original_download(root, name, url, previous, stop)
+
+            def checksum(path):
+                if path.name == "pending.parquet.part":
+                    checksum_started.set()
+                    self.assertTrue(context["stop"].wait(5), "Coordinator did not signal cancellation")
+                return original_checksum(path)
+
+            def interrupt_during_checksum(futures):
+                ready = next(future for future, name in futures.items() if name == names[0])
+                ready.result(timeout=5)
+                yield ready
+                self.assertTrue(checksum_started.wait(5), "Worker did not reach checksum validation")
+                raise KeyboardInterrupt
+
+            with patch.object(sys, "argv", ["download", directory, "--workers", "2"]), \
+                 patch.object(archive, "discover", return_value=files), \
+                 patch.object(archive, "urlopen", side_effect=lambda *_args, **_kwargs: Response(data)), \
+                 patch.object(archive, "download", side_effect=download), patch.object(archive, "checksum", side_effect=checksum), \
+                 patch.object(archive, "as_completed", side_effect=interrupt_during_checksum), patch("builtins.print"), \
+                 self.assertRaises(SystemExit) as stopped:
+                archive.main()
+            self.assertEqual(stopped.exception.code, 130)
+            manifest_path = root / ".download-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            self.assertFalse(manifest["complete"])
+            self.assertEqual(set(manifest["files"]), set(names))
+            for name in names:
+                self.assertEqual((root / name).read_bytes(), data)
+
+            with patch.object(sys, "argv", ["download", directory, "--workers", "2"]), \
+                 patch.object(archive, "discover", return_value=files), patch.object(archive, "urlopen") as request, \
+                 patch("builtins.print") as output:
+                archive.main()
+            request.assert_not_called()
+            self.assertTrue(json.loads(manifest_path.read_text())["complete"])
+            self.assertTrue(any(call.args[0].startswith("Complete: 2 files,") for call in output.call_args_list))
+
+    def test_failed_unprocessed_future_is_not_verified_during_shutdown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            name = "disease/failed.parquet"
+            url = archive.BASE + name
+            manifest_path = Path(directory) / ".download-manifest.json"
+            manifest_path.write_text(json.dumps({"release":archive.RELEASE, "base":archive.BASE,
+                "files":{name:{"bytes":20, "sha256":"a"*64, "url":url}}}))
+            failed = threading.Event()
+
+            def download(*_args):
+                failed.set()
+                raise ValueError("checksum mismatch")
+
+            def interrupt_after_failure(_futures):
+                self.assertTrue(failed.wait(5), "Worker did not reach its failure")
+                raise KeyboardInterrupt
+
+            with patch.object(sys, "argv", ["download", directory, "--workers", "1"]), \
+                 patch.object(archive, "discover", return_value=[(name, url)]), \
+                 patch.object(archive, "download", side_effect=download), \
+                 patch.object(archive, "as_completed", side_effect=interrupt_after_failure), patch("builtins.print"), \
+                 self.assertRaises(SystemExit):
+                archive.main()
+            manifest = json.loads(manifest_path.read_text())
+            self.assertFalse(manifest["complete"])
+            self.assertEqual(manifest["files"], {})
 
     def test_worker_count_is_bounded_before_discovery(self):
         for workers in ("0", "17", "-1"):

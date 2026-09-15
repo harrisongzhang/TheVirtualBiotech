@@ -7,16 +7,17 @@ cd TheVirtualBiotech
 
 ## What runs where
 
-Most of the repo cannot run on a laptop.
+| Task | Requirements |
+|---|---|
+| Audit tooling and its tests, reading a past run | Python 3.10+, no model key or reference data |
+| CLI and Gradio research | Conda environment, model key, reference data and enough memory for the analysis |
 
-| | Laptop | HPC cluster |
-|---|---|---|
-| Audit tooling, tests, reading a past run | **yes** — Python 3.10+, nothing else | yes |
-| The web interface and live agent runs | **no** | yes |
-
-The agents are not the obstacle; the **data** is. The MCP servers read Open
-Targets / GTEx / DepMap tables — hundreds of GB that are not in this repo and
-cannot be. Without them the specialists have nothing to query.
+The complete Open Targets 25.09 archive is approximately 29 GiB on disk and is
+downloaded separately. Allow additional disk space for the environment and
+outputs; loaded tables can require substantially more memory than their
+compressed files. An HPC cluster is optional: live runs can use a workstation
+or server with sufficient resources. See [setup](README.md#setup) for the data
+downloader and environment checks.
 
 ---
 
@@ -61,7 +62,7 @@ rendering a plausible-looking empty one.
 
 ---
 
-## On an HPC cluster — live runs
+## Live CLI and Gradio runs
 
 ### Setup
 
@@ -79,7 +80,14 @@ Live runs need the **Claude Code CLI**, which the pinned `claude-agent-sdk` whee
 
 Put your key and data paths in a `.env` file (see `README.md` for the full list):
 `ANTHROPIC_API_KEY`, `OPEN_TARGETS_DATA_PATH`, and the optional data locations.
-Then:
+Gradio also requires an explicitly configured access password:
+
+```bash
+BIOTECH_APP_PASSWORD="choose-your-own"
+```
+
+Enter any username and this password on the Gradio login form. The CLI does
+not require the web password. Then:
 
 ```bash
 source activate.sh      # activates the `vbt` env, configures the MCP servers
@@ -105,7 +113,8 @@ source activate.sh      # activates the `vbt` env, configures the MCP servers
 ./run.sh index                        # rebuild runs/INDEX.md
 ```
 
-For the web interface from your laptop, tunnel to whichever node it is on:
+Open `http://127.0.0.1:7860` when Gradio runs on your own machine. If it runs on
+a remote cluster node, forward its private port to your laptop:
 
 ```bash
 ssh -J <you>@<login-node> -L 7860:localhost:7860 <you>@<compute-node>

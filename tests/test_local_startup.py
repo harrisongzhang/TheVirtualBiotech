@@ -309,6 +309,21 @@ class TestApplicationStartup(unittest.TestCase):
                 self.assertEqual(client.get(download).text, "research artifact")
                 sdk.assert_not_called()
 
+    def test_normal_and_shared_launch_preserve_effective_queue_limits(self):
+        import gradio as gr
+
+        with patch.dict(os.environ, {"GRADIO_ANALYTICS_ENABLED": "False"}):
+            os.environ.pop("GRADIO_DEFAULT_CONCURRENCY_LIMIT", None)
+            for share, concurrency, max_size in ((False, 20, 50), (True, 1, None)):
+                with self.subTest(share=share), patch.object(self.app, "APP_PASSWORD", "test-password"), \
+                        patch.object(gr.Blocks, "launch", autospec=True) as launch, \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.app.main(share=share)
+                    blocks = launch.call_args.args[0]
+                    self.addCleanup(blocks.close, verbose=False)
+                    self.assertEqual(blocks._queue.default_concurrency_limit, concurrency)
+                    self.assertEqual(blocks._queue.max_size, max_size)
+
     def test_research_sessions_reject_missing_key_before_sdk_setup(self):
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}), tempfile.TemporaryDirectory() as tmp:
             with patch.object(self.cli, "SESSIONS_DIR", Path(tmp)):

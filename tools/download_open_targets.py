@@ -307,6 +307,17 @@ def main() -> None:
     save()
     pool = ThreadPoolExecutor(max_workers=args.workers)
     futures = {}
+    processed = set()
+
+    def remember_success(future):
+        nonlocal completed, total_bytes
+        result = future.result()
+        size = result["bytes"]
+        entries[futures[future]] = result
+        completed += 1
+        total_bytes += size
+        processed.add(future)
+
     try:
         for name, url in files:
             future = pool.submit(download, root, name, url, entries.get(name), stop)
@@ -314,10 +325,9 @@ def main() -> None:
         for future in as_completed(futures):
             name = futures[future]
             try:
-                entries[name] = future.result()
-                completed += 1
-                total_bytes += entries[name]["bytes"]
+                remember_success(future)
             except Exception as exc:
+                processed.add(future)
                 entries.pop(name, None)
                 errors.append(name)
                 print(f"FAILED {name}: {exc}", flush=True)
@@ -333,6 +343,15 @@ def main() -> None:
     finally:
         stop.set()
         pool.shutdown(wait=True, cancel_futures=True)
+        # Validation/rename may finish after cancellation. Preserve those
+        # results without counting futures already handled by as_completed.
+        for future, name in futures.items():
+            if future in processed or future.cancelled():
+                continue
+            if future.exception() is None:
+                remember_success(future)
+            else:
+                entries.pop(name, None)
         save(complete=completed == len(files) and not errors and not interrupted)
     if interrupted:
         print("Interrupted; completed and partial files are retained. Rerun to resume.", flush=True)
