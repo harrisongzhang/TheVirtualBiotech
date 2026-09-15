@@ -1,65 +1,89 @@
 # The Virtual Biotech
 
-A multi-agent AI system for pharmaceutical target identification and due diligence, built on the Claude Agent SDK. A Chief Scientific Officer (CSO) agent orchestrates a pool of specialist agents — each with access to curated biomedical databases via Model Context Protocol (MCP) servers — to answer arbitrary drug discovery and target biology queries.
+The Virtual Biotech uses a Chief Scientific Officer (CSO) agent and a team of
+specialists to investigate drug targets. Built on the Claude Agent SDK, it
+combines biomedical databases and analysis tools for target identification
+and due diligence.
 
-Start with the [Quickstart](QUICKSTART.md) for a complete installation and two CLI examples.
+Start with the [Quickstart](QUICKSTART.md) for installation and two CLI examples.
 
----
+[![A CSO coordinates specialist agents for target prioritization, target validation and modality selection, and clinical translation failure analysis.](docs/figures/figure0.png)](docs/figures/figure0.pdf)
+
+[Setup](#setup) · [CLI](#running-the-cli) · [Web interface](#running-gradio) · [Architecture](#architecture) · [Apptainer](#apptainer-linux-cluster-only)
 
 ## Setup
 
 ### 1. Create the conda environment
 
 Install Git and [Miniforge (Conda)](https://github.com/conda-forge/miniforge#install).
-Open a terminal with Conda available (the Miniforge Prompt on Windows). If
-`conda activate` asks you to initialize your shell, run `conda init` and reopen
-that terminal. Then clone the repository:
+Use a terminal where `conda` is available, or the Miniforge Prompt on Windows.
+If activation asks for shell initialization, run `conda init` and reopen the
+terminal.
 
 ```bash
 git clone https://github.com/harrisongzhang/TheVirtualBiotech.git
 cd TheVirtualBiotech
-```
-
-Run all subsequent commands from this repository root:
-
-```bash
 conda env create -f environment.yml
 conda activate vbt
 ```
 
-The environment includes all dependencies for the CLI, MCP servers, and analysis scripts (Python 3.11, scanpy, anndata, CELLxGENE Census, R integration, etc.).
+Run the remaining commands from the repository root. Activate `vbt` in each new
+terminal before running Python. The environment includes Python 3.11, the CLI
+and MCP dependencies, scanpy, anndata, CELLxGENE Census, and R integration.
+The SDK bundles the Claude Code CLI used for live research.
 
-Activate `vbt` in each new shell before running Python. Activation also makes
-the environment's R installation available to `rpy2`. For an existing `vbt`
-environment, apply dependency changes with
-`conda env update --name vbt --file environment.yml`.
+To update an existing `vbt` environment:
 
-The explicit `libopenblas` dependency supplies `libopenblas.so.0`, which the
-Linux `rpy2` extension needs even when Conda selects MKL for other BLAS packages.
-Check the R integration after installation:
+```bash
+conda env update --name vbt --file environment.yml
+```
+
+<details>
+<summary>Check R integration</summary>
+
+Conda activation makes R available to `rpy2`. Check that R and its required
+packages load:
 
 ```bash
 python -c "from rpy2.robjects import r; print(r('R.version.string')[0]); r('library(lme4); library(lmerTest)')"
 ```
 
-> **Live runs need the Claude Code CLI, which the pinned SDK provides.** The
-> `claude-agent-sdk` wheels bundle the CLI binary the SDK drives, and it is used
-> ahead of anything on your `PATH` — so the environment above needs no separate
-> install. If the SDK ever reports `CLINotFoundError` (pip having fallen back to
-> the source distribution, say), install the CLI yourself — the native installer
-> needs no Node.js:
-> ```bash
-> curl -fsSL https://claude.ai/install.sh | bash
-> ```
-> See Anthropic's [setup guide](https://code.claude.com/docs/en/setup) for other install methods. (The audit tooling, tests, and `verify` need no CLI at all.)
+On Linux, the explicit `libopenblas` dependency supplies `libopenblas.so.0` for
+`rpy2`, including when Conda selects MKL for other BLAS packages.
+
+</details>
+
+<details>
+<summary>If the SDK reports CLINotFoundError</summary>
+
+The pinned `claude-agent-sdk` wheels include the CLI and use that copy ahead
+of anything on `PATH`. A separate installation is normally unnecessary.
+If the binary is missing, for example after installing the SDK from a source
+distribution, install the CLI with:
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
+This native installer does not require Node.js. See Anthropic's
+[setup guide](https://code.claude.com/docs/en/setup) for other installation methods.
+The audit tooling, tests, and `verify` do not need the CLI.
+
+</details>
 
 ### 2. Obtain the data
 
-**Open Targets Platform data (required)**
+#### Open Targets (required)
 
-Download the [Open Targets Platform 25.09 data release](https://ftp.ebi.ac.uk/pub/databases/opentargets/platform/25.09/output/) — the exact archived version this system was built and tested on — in Parquet format. The loader expects a directory with one subdirectory per dataset, e.g.:
+Use the archived [Open Targets Platform 25.09 release](https://ftp.ebi.ac.uk/pub/databases/opentargets/platform/25.09/output/),
+the version used to build and test this system. The downloader retrieves its
+3,508 Parquet files across 38 datasets, preserving the directory layout:
 
+```bash
+python tools/download_open_targets.py /path/to/open_targets --workers 8
 ```
+
+```text
 /path/to/open_targets/
 ├── target/
 ├── credible_set/
@@ -68,246 +92,200 @@ Download the [Open Targets Platform 25.09 data release](https://ftp.ebi.ac.uk/pu
 └── ...
 ```
 
-The included downloader retrieves the archived layout automatically:
+No API key is needed. Rerun the same command to resume an interrupted download,
+or add `--list-only` to inspect the inventory without downloading files.
+The downloader announces discovery immediately and reports progress every
+10 seconds during transfer and verification.
 
-```bash
-python tools/download_open_targets.py /path/to/open_targets --workers 8
-```
+<details>
+<summary>Download progress and integrity checks</summary>
 
-The complete release contains 3,508 Parquet files in 38 datasets and occupies
-approximately 29 GiB. Allow additional disk space for the Conda environment
-and research outputs. Rerun the same command after an interrupted download;
-it resumes partial transfers and verifies completed files against the local
-size/SHA-256 manifest. Downloads are checked for complete transfers and Parquet
-header/footer markers. Use `--list-only` to inspect the archive inventory
-without downloading it. No API key is needed for downloading or local data
-checks. Loading large datasets into memory can require substantially more RAM
-than their compressed file size.
+Progress reports show validated files, bytes in active transfers (including
+resumed bytes), bytes received during this invocation (including retries),
+and elapsed time. Files count as validated after their transfer and checks
+finish.
 
-The downloader announces inventory discovery immediately and prints progress
-at least every 10 seconds while downloading/verifying. It shows validated
-files, bytes in active transfers (including resumed bytes), bytes received
-this invocation (including retries), and elapsed time. A file becomes validated
-only after its transfer and checks finish.
+The downloader checks transfer completeness and Parquet header/footer markers.
+It records sizes and SHA-256 hashes in a local manifest, then uses that manifest
+to verify completed files on subsequent runs.
 
-A separate Linux x86_64 installation on 15 September 2026 measured:
+</details>
 
-| Resource | Observed usage |
+Resource use measured on Linux x86_64 on 15 September 2026:
+
+| Resource | Measurement |
 |---|---|
-| Open Targets 25.09 archive | 28.99 GiB |
-| Installed Conda environment | About 5.4 GiB, plus package caches and outputs |
-| Largest process in target/DepMap smoke queries | About 9.8 GiB resident RAM |
-| Data download on the test server | About 28 minutes, including an interruption/resume test, with 8 then 16 workers |
+| Open Targets archive | 28.99 GiB |
+| Installed Conda environment | About 5.4 GiB |
+| Largest process in target/DepMap test queries | About 9.8 GiB resident RAM |
+| Download time | About 28 minutes, with 8 then 16 workers, including an interruption/resume test |
 
-These are measurements, not minimum requirements or promised timings. Concurrent
-specialist queries can consume more RAM than a single query. Allow disk space
-for caches and research outputs beyond the archive and environment.
+Allow additional disk space for package caches and research outputs. Loaded
+tables can use substantially more RAM than their compressed files, and
+concurrent specialist queries increase memory use. These measurements describe
+the test workload; requirements and download times depend on the machine,
+connection, and analysis.
 
-**Tahoe-100M drug perturbation data (optional — enables the Tahoe functional-genomics tools)**
+#### Tahoe-100M (optional)
 
-The [official Tahoe-100M dataset](https://huggingface.co/datasets/tahoebio/Tahoe-100M)
-provides pseudobulk differential-expression results. Follow the
-[Tahoe download and preparation recipe](docs/TAHOE_SETUP.md) to create the
-filtered files expected by this loader with `tools/prepare_tahoe.py`, then set
-`TAHOE_DATA_PATH` to that prepared directory. The recipe pins a source revision
-and defines the exact adjusted-p-value and log2-fold-change thresholds.
-Without Tahoe, the DepMap essentiality tools still work.
+Tahoe adds drug-perturbation tools using pseudobulk differential-expression
+results from the [official Tahoe-100M dataset](https://huggingface.co/datasets/tahoebio/Tahoe-100M).
+Follow the [download and preparation recipe](docs/TAHOE_SETUP.md), then set
+`TAHOE_DATA_PATH` to the prepared directory.
+
+The recipe pins the source revision and uses `tools/prepare_tahoe.py` to create
+the filtered files the loader expects. It documents the adjusted-p-value and
+log2-fold-change thresholds. DepMap essentiality tools work without Tahoe.
 
 ### 3. Set environment variables
 
-Create your local configuration from the supplied template:
+Copy the configuration template, then edit `.env` in the project root:
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` in the project root. Use absolute data paths and enter your own
-`ANTHROPIC_API_KEY`; the web UI also needs `BIOTECH_APP_PASSWORD`. The app loads
-this file automatically. It is excluded from Git. Quoted values are supported.
-The examples below are **file entries**, not shell exports. To configure the
-shell instead, use `export ANTHROPIC_API_KEY="..."` and
-`export OPEN_TARGETS_DATA_PATH="/absolute/path/to/open_targets"`.
-Exported variables take precedence over `.env`, including explicitly empty values.
+On Windows Command Prompt, use `copy .env.example .env`. Set your key and
+absolute data path; include a password if you plan to use the web interface:
 
-**Two kinds of paths — don't confuse them:**
-
-- **Reference data (read-only; you download and provide it):** `OPEN_TARGETS_DATA_PATH` — plus the optional `TAHOE_DATA_PATH` — point at large external datasets (see step 2 above). The app only ever *reads* these; it never writes to them.
-- **Working directory (writable; the app creates it):** the optional `MCP_OUTPUT_DIR` is a directory the app makes and writes into. It starts **empty**; you only choose *where* it lives.
-
-**Required:**
-```bash
-ANTHROPIC_API_KEY="sk-ant-..."
-OPEN_TARGETS_DATA_PATH="/path/to/open_targets"   # READ-ONLY Open Targets dump you download (see step 2)
-```
-
-**Optional — data:**
-```bash
-TAHOE_DATA_PATH="/path/to/tahoe/data"            # optional; enables the Tahoe functional-genomics tools (see step 2)
-```
-
-**Optional — output directory** (defaults to `data/` under the project root):
-```bash
-MCP_OUTPUT_DIR="/path/to/data"       # MCP server file outputs (parquet query results)
-```
-
-**Required for the Gradio web UI** (not needed by the CLI):
-```bash
+```dotenv
+ANTHROPIC_API_KEY="your-anthropic-api-key"
+OPEN_TARGETS_DATA_PATH="/absolute/path/to/open_targets"
 BIOTECH_APP_PASSWORD="choose-your-own"
 ```
-The Gradio app requires an explicitly configured access password. Gradio
-verifies it before serving the interface or accepting research submissions.
-Enter any username and the configured password on the login form. This is a
-single shared password for the local app.
+
+The app loads `.env` automatically, and Git ignores the file. Quoted values
+are supported. Exported shell variables take precedence, including explicitly
+empty values.
+
+| Variable | Purpose | Required or default |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Model access | Required for live research |
+| `OPEN_TARGETS_DATA_PATH` | Downloaded Open Targets directory; read-only | Required |
+| `BIOTECH_APP_PASSWORD` | Shared web access password | Required for Gradio; unused by the CLI |
+| `TAHOE_DATA_PATH` | Prepared Tahoe directory; read-only | Optional |
+| `MCP_OUTPUT_DIR` | Writable directory for MCP outputs, such as query-result Parquet files | Created automatically; defaults to `data/` in the project root |
+| `GRADIO_SERVER_PORT` | Local web port | Defaults to `7860` |
+
+The data directories contain reference files you download. `MCP_OUTPUT_DIR`
+starts empty and is created and populated by the app. Optional `.env` entries:
+
+```dotenv
+TAHOE_DATA_PATH="/absolute/path/to/tahoe-prepared"
+MCP_OUTPUT_DIR="/absolute/path/to/mcp_outputs"
+```
+
+For Gradio, enter any username and the configured password. The app verifies
+the shared password before serving the interface or accepting research requests.
+
+<details>
+<summary>Using shell variables instead of .env</summary>
+
+The examples above are file entries. In Bash, export variables with:
+
+```bash
+export ANTHROPIC_API_KEY="your-anthropic-api-key"
+export OPEN_TARGETS_DATA_PATH="/absolute/path/to/open_targets"
+```
+
+</details>
 
 ### 4. Configure the MCP servers and check setup
 
 ```bash
 python setup_mcp.py
-```
-
-This generates `mcp_config.json` for the active interpreter and checkout. It is
-machine-specific and excluded from Git; regenerate it after moving the checkout,
-changing environments or switching to Apptainer. The setup reports 12 servers.
-
-Check the local installation before making a model request:
-
-```bash
 python tools/doctor.py --skip-api-key --smoke
 ```
 
-This checks dependencies, all 38 reference-data directories, file readability
-and sizes, the download manifest when present, and the generated MCP paths.
-`--smoke` also reads one local disease record and initializes all 12 MCP servers;
-it does not load the large analysis tables or call a model/external data API.
-The doctor checks layout and sizes; rerunning the downloader rechecks SHA-256
-hashes. After adding your key, run `python tools/doctor.py` to include key-presence
-validation. A passing result does not validate model authentication or billing.
+`setup_mcp.py` configures 12 servers and writes `mcp_config.json` for the active
+interpreter and checkout. Git ignores this machine-specific file. Regenerate
+it after moving the checkout, changing environments, or switching to Apptainer.
 
-On systems with Bash, `./run.sh doctor --skip-api-key --smoke` runs the same checks
-and activates the environment for you. For a separate environment, use
-`VBT_ENV=/absolute/path/to/env ./run.sh doctor --skip-api-key --smoke`, or the
-`activate.local.sh` override described in `activate.sh`.
+The doctor checks dependencies, all 38 reference-data directories, file
+readability and sizes, the download manifest when present, and MCP paths.
+With `--smoke`, it also reads one disease record and initializes all 12 servers.
+This local check does not load the large analysis tables or call a model or
+external data API.
 
-The application regression tests can be run without model requests:
+After adding your key, run `python tools/doctor.py` to check key presence too.
+A pass does not validate authentication or billing. To recheck data hashes,
+rerun the downloader; the doctor checks layout and sizes.
+
+On systems with Bash, `./run.sh doctor --skip-api-key --smoke` also activates
+the environment. To use a separate environment:
+
+```bash
+VBT_ENV=/absolute/path/to/env ./run.sh doctor --skip-api-key --smoke
+```
+
+For custom activation, see the `activate.local.sh` override described in
+`activate.sh`. Run the regression tests without model requests:
 
 ```bash
 python -m unittest discover -s tests
 ```
 
----
-
-## Apptainer (Linux cluster only)
-
-`vbt.def` builds a self-contained Apptainer image with the conda environment
-baked in. Apptainer is Linux-only; for macOS or Windows, use the conda environment directly (see [Setup](#setup) — tested on macOS and Windows).
-
-The source code is **not** embedded — bind-mount the project
-directory at runtime so you can update code without rebuilding.
-
-### Build
-
-Run from the project root:
-
-```bash
-apptainer build vbt.sif vbt.def
-```
-
-### Run
-
-Use `apptainer exec` — not `apptainer run` — and set the working directory to
-the bind-mounted project with `--pwd`. Configure the MCP servers from *inside*
-the container first: `setup_mcp.py` records absolute interpreter and server
-paths, which differ between the container and a host conda environment.
-
-```bash
-apptainer exec \
-  --bind /path/to/project:/workspace \
-  --bind /path/to/open_targets:/data/open_targets \
-  --pwd /workspace \
-  vbt.sif python setup_mcp.py          # once per image
-
-apptainer exec \
-  --bind /path/to/project:/workspace \
-  --bind /path/to/open_targets:/data/open_targets \
-  --pwd /workspace \
-  vbt.sif python run.py
-```
-
-`mcp_config.json` is environment-specific, so regenerate it whenever you switch
-between the conda environment and the container.
-
-Environment variables (API keys, data paths, etc.) can be passed with `--env`
-or by bind-mounting a `.env` file into `/workspace`. Nothing else is needed for
-live runs: the CLI the SDK drives is bundled inside the image's Python
-environment, so it depends on neither `PATH` nor your host `$HOME`.
-
-### Test the image
-
-```bash
-apptainer test vbt.sif
-```
-
----
-
 ## Running the CLI
 
-Live queries require `ANTHROPIC_API_KEY` and the reference data configured above.
-They make billable model requests. See the [two quickstart examples](QUICKSTART.md#two-cli-examples).
+Research queries require the configured API key and reference data and incur
+model API charges. See the [two quickstart examples](QUICKSTART.md#two-cli-examples).
 
-| Interface | Start command | Output |
+| Interface | Command | Output directory |
 |---|---|---|
 | Interactive terminal | `python run.py` | `sessions/<timestamp>/` |
-| Headless question/conversation | `./run.sh run "<query>"` | `runs/<RUN_ID>/` |
-| Headless without Bash | `python run_vbt.py run "<query>"` | `runs/<RUN_ID>/` |
+| Headless question or conversation | `python run_vbt.py run "<query>"` | `runs/<RUN_ID>/` |
+| Headless with Bash activation | `./run.sh run "<query>"` | `runs/<RUN_ID>/` |
 
-Activate the environment and run `python setup_mcp.py` before using the Python
-entry points. `run.sh` handles activation and MCP configuration automatically.
-Regenerate `mcp_config.json` after moving the checkout or changing environments.
+Use the Python entry points after activating the environment and configuring
+MCP servers in [setup](#setup). `run.sh` handles activation and MCP configuration
+automatically.
 
-Both CLIs accept the same model IDs and quoted display labels:
+### Choose a model
+
+Both CLIs accept model IDs and quoted display labels:
 
 ```bash
 python run.py --model claude-opus-4-6
 ./run.sh run --model claude-opus-4-6 "Summarize the genetic evidence for OSMR in ulcerative colitis."
-# The label --model "Opus 4.6" selects the same model.
+# --model "Opus 4.6" selects the same model.
 ```
 
-The default is `claude-sonnet-4-5-20250929`. The chief-of-staff and scientific-reviewer
-always use Haiku. Run either CLI with `--help` to see the available labels.
-Unrecognized labels fail immediately. Model IDs starting with `claude-` are
-forwarded unchanged for Anthropic to validate; unavailable IDs produce an API
-error instead of silently selecting another model. See the
-[Anthropic model catalog](https://platform.claude.com/docs/en/about-claude/models/overview).
+The default is `claude-sonnet-4-5-20250929`. The chief-of-staff and
+scientific-reviewer always use Haiku. To see the labels and options, use
+`python run.py --help` or `python run_vbt.py run --help`.
 
-### Interactive commands and outputs
+Unrecognized labels fail immediately. Model IDs beginning with `claude-` are
+forwarded unchanged; Anthropic returns an API error for unavailable models.
+See the [model catalog](https://platform.claude.com/docs/en/about-claude/models/overview).
 
-After `python run.py` starts, type a question at the `You:` prompt. For multi-line
-input, enter a line containing `"""`, then your question, then another `"""` line.
+### Interactive sessions
 
-```text
-/summary   — print per-turn cost and agent breakdown
-/done      — end the session and write output files
-/help      — show available commands
-Ctrl+C     — graceful exit, writes output files
-```
+Run `python run.py`, then type a question at the `You:` prompt. For multi-line
+input, enter a line containing `"""`, your question, and another `"""` line.
 
-Each interactive session writes `session_report.json`, `transcript.md`,
-`trace.jsonl`, and agent files under `workspace/` in `sessions/<timestamp>/`.
+| Command | Action |
+|---|---|
+| `/summary` | Show per-turn cost and agent breakdown |
+| `/done` | Save the session and exit |
+| `/help` | Show available commands |
+| `Ctrl+C` | Exit gracefully and save output files |
 
-### Headless commands and outputs
+Sessions write `session_report.json`, `transcript.md`, `trace.jsonl`, and agent
+files under `workspace/` inside `sessions/<timestamp>/`.
+
+### Headless runs
 
 Pass one quoted argument per conversation turn, or use `-f questions.txt` for
 one turn per nonempty line. The runner prints the run ID and paths to its
-`README.md` and `audit.html`. Research artifacts are organized under
-`runs/<RUN_ID>/work/`; logs and evidence have their own subdirectories.
-Use that printed ID with `./run.sh verify <RUN_ID>` to check the recorded artifacts.
-The interactive `sessions/` layout is separate from the headless/web `runs/` layout.
+`README.md` and `audit.html`.
 
----
+Research artifacts go in `runs/<RUN_ID>/work/`; logs and evidence have their own
+subdirectories. Check the recorded artifacts with `./run.sh verify <RUN_ID>`.
+Headless and web runs share the `runs/` layout; interactive sessions use `sessions/`.
 
 ## Running Gradio
 
-Set `BIOTECH_APP_PASSWORD` in the project-root `.env`, then run:
+Set `BIOTECH_APP_PASSWORD` in `.env`, then start the web interface:
 
 ```bash
 conda activate vbt
@@ -316,23 +294,28 @@ python gradio_cso_app.py
 ```
 
 Open `http://127.0.0.1:7860` and sign in with any username and your configured
-password. If 7860 is occupied, set `GRADIO_SERVER_PORT="17860"` in `.env`, or
-launch with `GRADIO_SERVER_PORT=17860 python gradio_cso_app.py` and open
-`http://127.0.0.1:17860`. The app continues to bind to localhost by default.
-Research requests require `ANTHROPIC_API_KEY` and the reference-data
-path from setup step 3. On systems with Bash, `bash run.sh web` activates the
-environment, regenerates the MCP configuration and starts the same interface.
+password. The server binds to localhost. Research requests use the API key
+and reference data configured in [setup](#setup).
 
----
+If port 7860 is occupied, add this entry to `.env` and restart:
+
+```dotenv
+GRADIO_SERVER_PORT="17860"
+```
+
+Then open `http://127.0.0.1:17860`. From Bash, you can set the port for a single
+launch with `GRADIO_SERVER_PORT=17860 python gradio_cso_app.py`. The wrapper
+`./run.sh web` activates the environment, configures MCP servers, and starts
+the same interface.
 
 ## Architecture
 
 ### Specialist agents
 
-The CSO delegates to a flat pool of specialists, each with access to specific MCP servers:
+The CSO delegates directly to these specialists:
 
 | Agent | Role | Data sources |
-|-------|------|--------------|
+|---|---|---|
 | `genomics-analyst` | GWAS, L2G, QTL colocalization | Open Targets Genetics |
 | `functional-genomics-analyst` | CRISPR essentiality, DepMap (cancer only) | DepMap, Tahoe |
 | `single-cell-analyst` | Cell-type expression, scRNA-seq | CELLxGENE Census |
@@ -346,10 +329,10 @@ The CSO delegates to a flat pool of specialists, each with access to specific MC
 
 ### MCP servers
 
-Local MCP servers provide structured access to biomedical databases:
+Twelve MCP servers provide access to biomedical data and the run's evidence records:
 
 | Server | Data source |
-|--------|-------------|
+|---|---|
 | `expression` | GTEx bulk RNA-seq expression |
 | `genetics` | Open Targets Genetics (GWAS, L2G, QTL) |
 | `target` | Open Targets target annotations and druggability |
@@ -361,8 +344,56 @@ Local MCP servers provide structured access to biomedical databases:
 | `pathway` | Reactome pathways + Gene Ontology |
 | `interaction` | Protein-protein interaction networks |
 | `clinicaltrials` | ClinicalTrials.gov + cBioPortal cancer genomics |
+| `provenance` | Run claims, artifacts, analysis plans, and evidence records |
 
----
+## Apptainer (Linux cluster only)
+
+`vbt.def` builds a self-contained image with the Conda environment. Apptainer
+requires Linux; the [Conda setup](#setup) has also been tested on macOS and
+Windows.
+
+The source checkout stays on the host and is bind-mounted at runtime, so code
+updates do not require rebuilding the image.
+
+### Build
+
+Run from the repository root:
+
+```bash
+apptainer build vbt.sif vbt.def
+```
+
+### Run
+
+Use `apptainer exec` with `--pwd` set to the mounted project directory.
+`apptainer run` is not the application entry point. Configure MCP servers inside
+the container first so their absolute interpreter and script paths match:
+
+```bash
+apptainer exec \
+  --bind /path/to/project:/workspace \
+  --bind /path/to/open_targets:/data/open_targets \
+  --pwd /workspace \
+  vbt.sif python setup_mcp.py
+
+apptainer exec \
+  --bind /path/to/project:/workspace \
+  --bind /path/to/open_targets:/data/open_targets \
+  --pwd /workspace \
+  vbt.sif python run.py
+```
+
+Regenerate `mcp_config.json` whenever you switch between Conda and the container.
+Pass API keys and data paths with `--env`, or place a `.env` file in the mounted
+project directory at `/workspace`. Use paths as seen inside the container.
+The SDK's CLI is bundled in the image's Python environment and does not depend
+on the host's `PATH` or `$HOME`.
+
+### Test the image
+
+```bash
+apptainer test vbt.sif
+```
 
 ## License
 
