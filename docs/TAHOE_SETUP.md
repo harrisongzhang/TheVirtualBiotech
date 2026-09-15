@@ -90,4 +90,5 @@ python -c "from src.data.loader import get_data_loader; d = get_data_loader(prel
 ```
 
 This reads the same configuration as the app, including the required
-`OPEN_TARGETS_DATA_PATH`. Return to the [quickstart](../QUICKSTART.md) to run a query.
+`OPEN_TARGETS_DATA_PATH`. Continue with the
+[README's CLI instructions](../README.md#running-the-cli) to run a query.
