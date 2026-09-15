@@ -1,12 +1,18 @@
 # The Virtual Biotech
 
-The Virtual Biotech uses a Chief Scientific Officer (CSO) agent and a team of
-specialists to investigate drug targets. Built on the Claude Agent SDK, it
-combines biomedical databases and analysis tools for target identification
-and due diligence.
+The Virtual Biotech is a multi-agent AI framework for therapeutic discovery
+and development. It models a cross-functional therapeutic research organization:
+a virtual Chief Scientific Officer (CSO) coordinates scientist agents that
+retrieve, analyze, and integrate multimodal biomedical evidence.
 
-The **interactive CLI is the recommended starting point**. Follow the
-[Quickstart](QUICKSTART.md) for installation and two CLI examples.
+The system supports target prioritization, target validation and modality
+selection, and analysis of clinical translation failure. It is designed for
+human-guided research and decision support, with users setting the scientific
+question and steering follow-up analyses.
+
+The **interactive CLI is the recommended starting point**. For a first
+installation, follow [Setup](#setup) below, then continue to
+[Running the CLI](#running-the-cli).
 
 [![A CSO coordinates specialist agents for target prioritization, target validation and modality selection, and clinical translation failure analysis.](docs/figures/figure0.png)](docs/figures/figure0.pdf)
 
@@ -31,7 +37,6 @@ conda activate vbt
 Run the remaining commands from the repository root. Activate `vbt` in each new
 terminal before running Python. The environment includes Python 3.11, the CLI
 and MCP dependencies, scanpy, anndata, CELLxGENE Census, and R integration.
-The SDK bundles the Claude Code CLI used for live research.
 
 To update an existing `vbt` environment:
 
@@ -55,20 +60,20 @@ On Linux, the explicit `libopenblas` dependency supplies `libopenblas.so.0` for
 </details>
 
 <details>
-<summary>If the SDK reports CLINotFoundError</summary>
+<summary>If startup reports CLINotFoundError</summary>
 
-The pinned `claude-agent-sdk` wheels include the CLI and use that copy ahead
-of anything on `PATH`. A separate installation is normally unnecessary.
-If the binary is missing, for example after installing the SDK from a source
-distribution, install the CLI with:
+The standard environment includes the research runtime and uses its bundled
+executable ahead of anything on `PATH`. A separate installation is normally
+unnecessary. If the executable is missing, for example after installing
+dependencies from source, install it with:
 
 ```bash
 curl -fsSL https://claude.ai/install.sh | bash
 ```
 
-This native installer does not require Node.js. See Anthropic's
-[setup guide](https://code.claude.com/docs/en/setup) for other installation methods.
-The audit tooling, tests, and `verify` do not need the CLI.
+This native installer does not require Node.js. See the
+[runtime installation guide](https://code.claude.com/docs/en/setup) for other methods.
+The audit tooling, tests, and `verify` do not need this runtime.
 
 </details>
 
@@ -189,6 +194,9 @@ export OPEN_TARGETS_DATA_PATH="/absolute/path/to/open_targets"
 
 ### 4. Configure the MCP servers and check setup
 
+Model Context Protocol (MCP) servers connect the scientist agents to their data
+and analysis tools. Configure them for your installation:
+
 ```bash
 python setup_mcp.py
 python tools/doctor.py --skip-api-key --smoke
@@ -216,11 +224,14 @@ VBT_ENV=/absolute/path/to/env ./run.sh doctor --skip-api-key --smoke
 ```
 
 For custom activation, see the `activate.local.sh` override described in
-`activate.sh`. Run the regression tests without model requests:
+`activate.sh`. Optionally, run the regression tests without model requests:
 
 ```bash
 python -m unittest discover -s tests
 ```
+
+Once setup checks pass and your API key is configured, continue below to run
+your first query.
 
 ## Running the CLI
 
@@ -239,15 +250,17 @@ At the `You:` prompt, enter:
 Evaluate PCSK9 as a target for lowering LDL cholesterol, including genetic evidence and existing therapies.
 ```
 
-Ask follow-up questions in the same session, then type `/done` to save and exit.
+If the CSO asks clarifying questions, answer them at the same prompt to set
+the scope of the analysis. Ask follow-up questions in the same session, then
+type `/done` to save and exit.
+
 For a single query that exits when finished:
 
 ```bash
 python run_vbt.py run "Evaluate PCSK9 as a target for lowering LDL cholesterol, including genetic evidence and existing therapies."
 ```
 
-Both examples use the default model. See the
-[quickstart examples](QUICKSTART.md#two-cli-examples) for the same workflow.
+Both examples use the default model.
 
 | Interface | Command | Output directory |
 |---|---|---|
@@ -292,6 +305,9 @@ input, enter a line containing `"""`, your question, and another `"""` line.
 Sessions write `session_report.json`, `transcript.md`, `trace.jsonl`, and agent
 files under `workspace/` inside `sessions/<timestamp>/`.
 
+For a short launch reference after installation, see the
+[interactive CLI quickstart](QUICKSTART.md).
+
 ### Headless runs
 
 Pass one quoted argument per conversation turn, or use `-f questions.txt` for
@@ -301,6 +317,42 @@ one turn per nonempty line. The runner prints the run ID and paths to its
 Research artifacts go in `runs/<RUN_ID>/work/`; logs and evidence have their own
 subdirectories. Check the recorded artifacts with `./run.sh verify <RUN_ID>`.
 Headless and web runs share the `runs/` layout; interactive sessions use `sessions/`.
+
+<details>
+<summary>Audit tooling without a model key</summary>
+
+Reading and verifying existing runs and running the audit-specific tests need
+only Python 3.10+; they do not require the Conda environment, reference data,
+or model access.
+
+```bash
+python3 tests/test_audit_spine.py
+python3 tests/test_run_lifecycle.py
+python3 tests/test_claim_ui.py
+python3 tests/test_plan_and_verify.py
+python3 tests/test_regressions.py
+python3 tools/audit_run.py /path/to/old-session -o ./audits
+python3 run_vbt.py verify <RUN_ID>
+```
+
+The retrofit tool builds `audits/<id>/audit.html` from an old session's
+`trace.jsonl`. Sessions without that trace cannot be audited. Some tests need
+a recorded session and skip when it is absent; set `VBT_TEST_SESSION` to a
+session directory to enable them. In the application environment, run the
+complete suite with `python -m unittest discover -s tests`.
+
+`verify` re-hashes artifacts and re-resolves claims. Adding `--rerun` also
+executes the recorded analysis code and compares outputs by filename; it does
+not guarantee that every original output is regenerated. Re-execution needs
+the dependencies and data used by that analysis. `replay <RUN_ID>` submits
+the same conversation to the recorded models and compares the result. It
+makes new model requests, and stochastic sampling can change the trajectory.
+
+See [the run manifest](src/utils/run_manifest.py) for the output layout and
+[the run-organization instructions](.claude/skills/run-organization/SKILL.md)
+for how the CSO records plans, evidence, and artifacts.
+
+</details>
 
 ## Running Gradio
 
@@ -335,7 +387,31 @@ launch with `GRADIO_SERVER_PORT=17860 python gradio_cso_app.py`. The wrapper
 `./run.sh web` activates the environment, configures MCP servers, and starts
 the same interface.
 
+For a remote server, forward its port from your laptop. If the app uses port
+17860 on the server:
+
+```bash
+ssh -L 17860:localhost:17860 <you>@<server>
+```
+
+Then open `http://localhost:17860` on your laptop.
+
 ## Architecture
+
+The scientist agents span four research divisions: Target Identification and
+Prioritization, Target Safety, Modality Selection, and Clinical Officers.
+The chief of staff and scientific reviewer support the CSO's office.
+
+The CSO clarifies the user's intent and uses the chief of staff's briefing on
+the field and available data to plan the work. Scientist agents query data,
+run analyses, and interpret results within their domains. The scientific
+reviewer checks the methods, evidence, and alignment with the original question;
+the CSO then requests further analysis where needed and synthesizes the findings.
+
+The current data and tools focus on early-stage human therapeutic research.
+The strength of a conclusion depends on coverage of the target, disease,
+tissues, and populations in the available data. Generated hypotheses need
+experimental validation.
 
 ### Specialist agents
 
@@ -351,12 +427,13 @@ The CSO delegates directly to these specialists:
 | `clinical-trialist` | Clinical trials, cancer genomics | ClinicalTrials.gov, cBioPortal |
 | `target-biologist` | Druggability, protein structure, localization | Open Targets, GTEx |
 | `medchem-pharmacologist` | Drug development, modality ranking | ChEMBL, Open Targets |
-| `chief-of-staff` | Web intelligence, field overview | WebSearch, WebFetch |
-| `scientific-reviewer` | Quality assurance, rigor review | (read-only) |
+| `chief-of-staff` | Field briefing, data landscape, recent developments | WebSearch, WebFetch |
+| `scientific-reviewer` | Review of methods, evidence, and alignment with the question | Specialist outputs (read-only) |
 
 ### MCP servers
 
-Twelve MCP servers provide access to biomedical data and the run's evidence records:
+Twelve MCP servers provide standardized tools for querying biomedical data
+and recording the run's evidence:
 
 | Server | Data source |
 |---|---|
@@ -413,8 +490,8 @@ apptainer exec \
 Regenerate `mcp_config.json` whenever you switch between Conda and the container.
 Pass API keys and data paths with `--env`, or place a `.env` file in the mounted
 project directory at `/workspace`. Use paths as seen inside the container.
-The SDK's CLI is bundled in the image's Python environment and does not depend
-on the host's `PATH` or `$HOME`.
+The research runtime is bundled in the image's Python environment and does
+not depend on executables on the host's `PATH` or in its `$HOME`.
 
 ### Test the image
 
