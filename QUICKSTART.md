@@ -1,5 +1,8 @@
 # Quickstart
 
+The **interactive CLI is the recommended starting point**. This guide covers
+installation and two ways to run queries from a terminal.
+
 Live research needs Git, [Miniforge (Conda)](https://github.com/conda-forge/miniforge#install),
 an Anthropic API key, and the Open Targets reference data. Start in a terminal
 where `conda` is available. If activation asks for shell initialization, run
@@ -43,12 +46,11 @@ Edit `.env` in the project root with your data path and key:
 ```dotenv
 OPEN_TARGETS_DATA_PATH="/absolute/path/to/open_targets"
 ANTHROPIC_API_KEY="your-anthropic-api-key"
-BIOTECH_APP_PASSWORD="choose-your-own-web-password"
 ```
 
 These are **file entries**. The app loads `.env` automatically; exported shell
-variables take precedence, including empty ones. The web password is needed
-only for Gradio. You can leave the API key blank while testing the local setup.
+variables take precedence, including empty ones. You can leave the API key blank
+while testing the local setup.
 Tahoe is optional; its separate [download/preparation recipe](docs/TAHOE_SETUP.md)
 enables drug-perturbation tools. DepMap works without Tahoe.
 
@@ -74,20 +76,25 @@ activation and MCP configuration. For another environment, set
 
 Both examples make billable model requests and need the key and data above.
 
-**1. Interactive conversation:**
+**1. Interactive conversation (recommended):**
 
 ```bash
 python run.py
 ```
 
-At the `You:` prompt, enter `Look up OSMR and summarize its function and tractability.`
+At the `You:` prompt, enter:
+
+```text
+Evaluate PCSK9 as a target for lowering LDL cholesterol, including genetic evidence and existing therapies.
+```
+
 Ask follow-up questions in the same session, then type `/done` to save and exit.
 The transcript, trace and report are saved in `sessions/<timestamp>/`.
 
-**2. Headless question with an explicit model:**
+**2. Single query:**
 
 ```bash
-python run_vbt.py run --model claude-opus-4-6 "Summarize the genetic evidence linking OSMR to ulcerative colitis."
+python run_vbt.py run "Evaluate PCSK9 as a target for lowering LDL cholesterol, including genetic evidence and existing therapies."
 ```
 
 The command prints a run ID and report paths under `runs/<RUN_ID>/`.
@@ -95,13 +102,22 @@ Use `python run_vbt.py verify <RUN_ID>` with that printed ID to check the record
 artifacts. With Bash, `./run.sh run ...` is the same headless interface and
 activates the environment for you.
 
-Both CLIs accept Claude model IDs or quoted labels such as `--model "Opus 4.6"`.
+Both examples use the default model. To change it, add an optional model ID
+such as `--model claude-opus-4-6` or a quoted label such as `--model "Opus 4.6"`.
 The default is `claude-sonnet-4-5-20250929`; the chief-of-staff and
 scientific-reviewer use Haiku. Unknown labels fail immediately, and model IDs
 are forwarded unchanged for Anthropic to validate. See `python run.py --help`
 or `python run_vbt.py run --help` for labels and options.
 
 ## Web interface
+
+The web interface is optional. To use it, add a shared access password to `.env`:
+
+```dotenv
+BIOTECH_APP_PASSWORD="choose-your-own-web-password"
+```
+
+The CLI does not use this password. Start the web interface with:
 
 ```bash
 python gradio_cso_app.py

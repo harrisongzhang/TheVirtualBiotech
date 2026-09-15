@@ -142,6 +142,16 @@ class OpenTargetsDataLoader:
         Raises:
             FileNotFoundError: If dataset path doesn't exist
         """
+        dataset = self.get_arrow_dataset(name)
+        table = dataset.to_table()
+        return table.to_pandas()
+
+    def get_arrow_dataset(self, name: str) -> ds.Dataset:
+        """Open Parquet metadata without materializing or caching the dataset.
+
+        Use this for filtered queries of large, nested reference tables: their
+        decoded Python objects can be much larger than their Parquet files.
+        """
         path = self._base_path / name
 
         if not path.exists():
@@ -151,9 +161,7 @@ class OpenTargetsDataLoader:
             )
 
         # Use PyArrow Dataset API (handles both directories and single files)
-        dataset = ds.dataset(str(path), format="parquet")
-        table = dataset.to_table()
-        return table.to_pandas()
+        return ds.dataset(str(path), format="parquet")
 
     def is_loaded(self, name: str) -> bool:
         """

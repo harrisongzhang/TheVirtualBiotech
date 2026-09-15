@@ -5,11 +5,12 @@ specialists to investigate drug targets. Built on the Claude Agent SDK, it
 combines biomedical databases and analysis tools for target identification
 and due diligence.
 
-Start with the [Quickstart](QUICKSTART.md) for installation and two CLI examples.
+The **interactive CLI is the recommended starting point**. Follow the
+[Quickstart](QUICKSTART.md) for installation and two CLI examples.
 
 [![A CSO coordinates specialist agents for target prioritization, target validation and modality selection, and clinical translation failure analysis.](docs/figures/figure0.png)](docs/figures/figure0.pdf)
 
-[Setup](#setup) · [CLI](#running-the-cli) · [Web interface](#running-gradio) · [Architecture](#architecture) · [Apptainer](#apptainer-linux-cluster-only)
+[Setup](#setup) · [CLI](#running-the-cli) · [Web interface (optional)](#running-gradio) · [Architecture](#architecture) · [Apptainer](#apptainer-linux-cluster-only)
 
 ## Setup
 
@@ -146,12 +147,11 @@ cp .env.example .env
 ```
 
 On Windows Command Prompt, use `copy .env.example .env`. Set your key and
-absolute data path; include a password if you plan to use the web interface:
+absolute data path:
 
 ```dotenv
 ANTHROPIC_API_KEY="your-anthropic-api-key"
 OPEN_TARGETS_DATA_PATH="/absolute/path/to/open_targets"
-BIOTECH_APP_PASSWORD="choose-your-own"
 ```
 
 The app loads `.env` automatically, and Git ignores the file. Quoted values
@@ -162,10 +162,8 @@ empty values.
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Model access | Required for live research |
 | `OPEN_TARGETS_DATA_PATH` | Downloaded Open Targets directory; read-only | Required |
-| `BIOTECH_APP_PASSWORD` | Shared web access password | Required for Gradio; unused by the CLI |
 | `TAHOE_DATA_PATH` | Prepared Tahoe directory; read-only | Optional |
 | `MCP_OUTPUT_DIR` | Writable directory for MCP outputs, such as query-result Parquet files | Created automatically; defaults to `data/` in the project root |
-| `GRADIO_SERVER_PORT` | Local web port | Defaults to `7860` |
 
 The data directories contain reference files you download. `MCP_OUTPUT_DIR`
 starts empty and is created and populated by the app. Optional `.env` entries:
@@ -175,8 +173,7 @@ TAHOE_DATA_PATH="/absolute/path/to/tahoe-prepared"
 MCP_OUTPUT_DIR="/absolute/path/to/mcp_outputs"
 ```
 
-For Gradio, enter any username and the configured password. The app verifies
-the shared password before serving the interface or accepting research requests.
+Web-specific settings are covered under [Running Gradio](#running-gradio).
 
 <details>
 <summary>Using shell variables instead of .env</summary>
@@ -228,11 +225,33 @@ python -m unittest discover -s tests
 ## Running the CLI
 
 Research queries require the configured API key and reference data and incur
-model API charges. See the [two quickstart examples](QUICKSTART.md#two-cli-examples).
+model API charges. After [setup](#setup), start the recommended interactive CLI
+from the repository root:
+
+```bash
+conda activate vbt
+python run.py
+```
+
+At the `You:` prompt, enter:
+
+```text
+Evaluate PCSK9 as a target for lowering LDL cholesterol, including genetic evidence and existing therapies.
+```
+
+Ask follow-up questions in the same session, then type `/done` to save and exit.
+For a single query that exits when finished:
+
+```bash
+python run_vbt.py run "Evaluate PCSK9 as a target for lowering LDL cholesterol, including genetic evidence and existing therapies."
+```
+
+Both examples use the default model. See the
+[quickstart examples](QUICKSTART.md#two-cli-examples) for the same workflow.
 
 | Interface | Command | Output directory |
 |---|---|---|
-| Interactive terminal | `python run.py` | `sessions/<timestamp>/` |
+| Interactive terminal (recommended) | `python run.py` | `sessions/<timestamp>/` |
 | Headless question or conversation | `python run_vbt.py run "<query>"` | `runs/<RUN_ID>/` |
 | Headless with Bash activation | `./run.sh run "<query>"` | `runs/<RUN_ID>/` |
 
@@ -242,11 +261,11 @@ automatically.
 
 ### Choose a model
 
-Both CLIs accept model IDs and quoted display labels:
+Model selection is optional. Both CLIs accept model IDs and quoted display labels:
 
 ```bash
 python run.py --model claude-opus-4-6
-./run.sh run --model claude-opus-4-6 "Summarize the genetic evidence for OSMR in ulcerative colitis."
+./run.sh run --model claude-opus-4-6 "Evaluate PCSK9 as a target for lowering LDL cholesterol, including genetic evidence and existing therapies."
 # --model "Opus 4.6" selects the same model.
 ```
 
@@ -285,7 +304,15 @@ Headless and web runs share the `runs/` layout; interactive sessions use `sessio
 
 ## Running Gradio
 
-Set `BIOTECH_APP_PASSWORD` in `.env`, then start the web interface:
+The web interface is optional. To use it, set a shared access password in `.env`:
+
+```dotenv
+BIOTECH_APP_PASSWORD="choose-your-own"
+```
+
+This password is required for the web interface; the CLI does not use it.
+Gradio verifies it before serving the interface or accepting research requests.
+Start the web interface with:
 
 ```bash
 conda activate vbt

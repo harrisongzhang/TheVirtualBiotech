@@ -1,15 +1,13 @@
 #!/bin/bash
 #
-# run.sh — the single entry point for The Virtual Biotech.
+# run.sh — headless queries, setup checks, and an optional web interface.
 #
-# Wraps environment activation, MCP configuration, the run itself, and the
-# post-run bookkeeping that makes a run auditable. Before this existed, starting
-# the app, running a batch, auditing an old session and checking a result were
-# four different invocations with four different setups; that is a large part of
-# why runs were hard to reproduce.
+# Interactive CLI (recommended; run from the repository root after setup):
+#   conda activate vbt
+#   python setup_mcp.py
+#   python run.py
 #
 # Usage:
-#   ./run.sh web [--share|--tunnel]     launch the web interface
 #   ./run.sh run "<query>" [...]        run headlessly; repeat for a conversation
 #   ./run.sh run -f questions.txt       one turn per line
 #   ./run.sh replay <RUN_ID>            re-run a past run's turns, then diff
@@ -18,12 +16,13 @@
 #   ./run.sh index                      rebuild runs/INDEX.md
 #   ./run.sh doctor [--skip-api-key] [--smoke]  check local setup; no model requests
 #   ./run.sh test                       run the audit test suite
+#   ./run.sh web [--share]              launch the optional web interface
 #
 # Environment:
-#   GRADIO_SERVER_PORT     web port (default: 7860)
-#   BIOTECH_APP_PASSWORD   web access password
 #   VBT_RUNS_DIR           where runs are written (default: ./runs)
 #   CLAUDE_CONFIG_DIR      SDK config/transcripts (must be writable by you)
+#   GRADIO_SERVER_PORT     web port (default: 7860)
+#   BIOTECH_APP_PASSWORD   web access password (web only)
 
 set -euo pipefail
 

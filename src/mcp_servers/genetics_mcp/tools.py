@@ -11,6 +11,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.data.loader import get_data_loader
+from src.data.query import scan_top_rows
 from src.utils.output_manager import OutputManager
 import logging
 import pandas as pd
@@ -125,22 +126,20 @@ def query_gwas_associations(
         om = OutputManager(server_name='genetics', tool_name='query_gwas_associations')
         final_path = om.get_output_path(user_path=output_path, auto_suffix='.parquet')
 
-        credible_set = _get_loader().get_dataset("credible_set")
-
         # Build query filter
-        mask = pd.Series([True] * len(credible_set))
+        mask = ds.scalar(True)
         query_params = {}
 
         if study_id is not None:
-            mask &= (credible_set['studyId'] == study_id)
+            mask &= (ds.field('studyId') == study_id)
             query_params['study_id'] = study_id
 
         if variant_id is not None:
-            mask &= (credible_set['variantId'] == variant_id)
+            mask &= (ds.field('variantId') == variant_id)
             query_params['variant_id'] = variant_id
 
         if chromosome is not None:
-            mask &= (credible_set['chromosome'] == chromosome)
+            mask &= (ds.field('chromosome') == chromosome)
             query_params['chromosome'] = chromosome
 
         if region is not None:
@@ -148,13 +147,15 @@ def query_gwas_associations(
             try:
                 chrom, positions = region.replace('chr', '').split(':')
                 start, end = map(int, positions.split('-'))
+                if not chrom or start < 0 or end < start:
+                    raise ValueError('invalid region bounds')
                 mask &= (
-                    (credible_set['chromosome'] == chrom) &
-                    (credible_set['position'] >= start) &
-                    (credible_set['position'] <= end)
+                    (ds.field('chromosome') == chrom) &
+                    (ds.field('position') >= start) &
+                    (ds.field('position') <= end)
                 )
                 query_params['region'] = region
-            except:
+            except (ValueError, TypeError, AttributeError):
                 return {
                     "success": False,
                     "error": f"Invalid region format: {region}. Use 'chr1:1000000-2000000' or '1:1000000-2000000'",
@@ -171,11 +172,11 @@ def query_gwas_associations(
             }
 
         # Sort by GWAS significance (most significant first) before limiting
-        matches = credible_set[mask]
-        sort_cols = [c for c in ['pValueExponent', 'pValueMantissa'] if c in matches.columns]
-        if sort_cols:
-            matches = matches.sort_values(sort_cols, ascending=True, na_position='last')
-        matches = matches.head(limit)
+        matches = scan_top_rows(
+            _get_loader().get_arrow_dataset("credible_set"), filter=mask,
+            sort_keys=[('pValueExponent', 'ascending'), ('pValueMantissa', 'ascending')],
+            limit=limit,
+        ).to_pandas()
 
         if len(matches) == 0:
             return {
@@ -401,30 +402,28 @@ def get_credible_sets(
         om = OutputManager(server_name='genetics', tool_name='get_credible_sets')
         final_path = om.get_output_path(user_path=output_path, auto_suffix='.parquet')
 
-        credible_set = _get_loader().get_dataset("credible_set")
-
         # Build query filter
-        mask = pd.Series([True] * len(credible_set))
+        mask = ds.scalar(True)
         query_params = {}
 
         # Filter to entries with credible set data (has locus array)
-        mask &= credible_set['locus'].notna()
+        mask &= ds.field('locus').is_valid()
 
         if study_locus_id is not None:
-            mask &= (credible_set['studyLocusId'] == study_locus_id)
+            mask &= (ds.field('studyLocusId') == study_locus_id)
             query_params['study_locus_id'] = study_locus_id
 
         if study_id is not None:
-            mask &= (credible_set['studyId'] == study_id)
+            mask &= (ds.field('studyId') == study_id)
             query_params['study_id'] = study_id
 
         if study_type is not None:
-            mask &= (credible_set['studyType'] == study_type)
+            mask &= (ds.field('studyType') == study_type)
             query_params['study_type'] = study_type
 
         if min_confidence is not None:
             # Filter based on credible set log10BF
-            mask &= (credible_set['credibleSetlog10BF'] >= min_confidence)
+            mask &= (ds.field('credibleSetlog10BF') >= min_confidence)
             query_params['min_confidence'] = min_confidence
 
         if not query_params:
@@ -436,10 +435,10 @@ def get_credible_sets(
             }
 
         # Sort by credible-set log10 Bayes factor (highest confidence first) before limiting
-        matches = credible_set[mask]
-        if 'credibleSetlog10BF' in matches.columns:
-            matches = matches.sort_values('credibleSetlog10BF', ascending=False, na_position='last')
-        matches = matches.head(limit)
+        matches = scan_top_rows(
+            _get_loader().get_arrow_dataset("credible_set"), filter=mask,
+            sort_keys=[('credibleSetlog10BF', 'descending')], limit=limit,
+        ).to_pandas()
 
         if len(matches) == 0:
             return {
