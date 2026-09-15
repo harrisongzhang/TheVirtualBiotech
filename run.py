@@ -20,6 +20,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
+
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -526,6 +530,11 @@ class Session:
 
     async def initialize(self):
         """Initialize the CSO client."""
+        if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+            raise ValueError(
+                "ANTHROPIC_API_KEY is not set. Configure it in the project-root "
+                ".env or export it before starting research."
+            )
         from claude_agent_sdk import ClaudeAgentOptions
         from claude_agent_sdk.types import ThinkingConfigAdaptive
 
@@ -866,6 +875,8 @@ def main():
         ),
     )
     args = parser.parse_args()
+    from run_vbt import _require_api_key
+    _require_api_key()
     session = Session(model=args.model)
     asyncio.run(session.run_repl())
 

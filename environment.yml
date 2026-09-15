@@ -25,6 +25,7 @@ dependencies:
   - pycirclize=1.10.1
   - pillow=12.1.0
   # R integration (mixed-effects models)
+  - libopenblas=0.3.34  # rpy2's compiled extension links libopenblas.so.0
   - rpy2=3.6.4
   - r-base=4.4.3
   - r-lme4=1.1_38

@@ -15,6 +15,7 @@ For external access via Cloudflare Tunnel:
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -30,6 +31,11 @@ import traceback
 import zipfile
 
 import gradio as gr
+from dotenv import load_dotenv
+
+# Use this checkout's configuration even when launched from another directory.
+# Exported environment variables take precedence over .env values.
+load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -54,8 +60,8 @@ from src.utils.run_report import render_audit_html, render_readme
 # Configuration
 # =============================================================================
 
-# Password for access (change this or set via environment variable)
-APP_PASSWORD = os.environ.get("BIOTECH_APP_PASSWORD", "drug")
+# Explicitly configured password for Gradio's server-side authentication.
+APP_PASSWORD = os.environ.get("BIOTECH_APP_PASSWORD", "")
 
 # Server settings
 SERVER_HOST = "127.0.0.1"  # Use 0.0.0.0 if not using Cloudflare Tunnel
@@ -868,6 +874,12 @@ class CSOSession:
             if self.is_initialized:
                 return
 
+            if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+                raise ValueError(
+                    "ANTHROPIC_API_KEY is not set. Configure it in the project-root "
+                    ".env or export it before starting research."
+                )
+
             from claude_agent_sdk import ClaudeAgentOptions
             from claude_agent_sdk.types import ThinkingConfigAdaptive
 
@@ -1646,7 +1658,14 @@ async def async_process_message(message: str, history: list, session_id: str, mo
 
 def check_password(password: str) -> bool:
     """Check if the provided password is correct"""
-    return password == APP_PASSWORD
+    return bool(APP_PASSWORD) and isinstance(password, str) and hmac.compare_digest(
+        password.encode("utf-8"), APP_PASSWORD.encode("utf-8")
+    )
+
+
+def authenticate(_username: str, password: str) -> bool:
+    """Authenticate the shared local app password through Gradio's server."""
+    return check_password(password)
 
 
 def get_session_files(session_id: str) -> tuple[list, list]:
@@ -1785,7 +1804,7 @@ def get_active_users_display() -> str:
 # Gradio Interface
 # =============================================================================
 
-def create_interface():
+def create_interface(authenticated_by_server: bool = False):
     """Create the Gradio interface"""
 
     # Stanford Cardinal color ramp for Gradio theme engine
@@ -2263,11 +2282,11 @@ def create_interface():
     ) as demo:
 
         # State for authentication and session management
-        authenticated = gr.State(False)
+        authenticated = gr.State(authenticated_by_server)
         session_id = gr.State("")  # Generated per user in async_process_message
 
         # Login screen
-        with gr.Column(visible=True, elem_classes=["login-container"]) as login_screen:
+        with gr.Column(visible=not authenticated_by_server, elem_classes=["login-container"]) as login_screen:
             gr.HTML(
                 f"""
                 <div style="text-align: center; margin-bottom: 1.5rem;">
@@ -2287,7 +2306,7 @@ def create_interface():
             login_error = gr.Markdown(visible=False)
 
         # Main interface (hidden until authenticated)
-        with gr.Column(visible=False, elem_classes=["main-screen-container"]) as main_screen:
+        with gr.Column(visible=authenticated_by_server, elem_classes=["main-screen-container"]) as main_screen:
             # Header with active users counter
             gr.HTML(
                 f"""
@@ -2678,32 +2697,39 @@ def create_interface():
 # Main Entry Point
 # =============================================================================
 
-def main():
+def main(share: bool = False):
     """Main entry point"""
+    if not APP_PASSWORD:
+        raise SystemExit(
+            "BIOTECH_APP_PASSWORD is not set. Configure an access password in "
+            "the project-root .env or export it before launching the web interface."
+        )
+    server_host = "0.0.0.0" if share else SERVER_HOST
     print("=" * 70)
     print("VIRTUAL BIOTECH INSTITUTE - WEB INTERFACE")
     print("=" * 70)
     print()
-    print(f"Starting server on http://{SERVER_HOST}:{SERVER_PORT}")
+    print(f"Starting server on http://{server_host}:{SERVER_PORT}")
     print()
     print("For external access via Cloudflare Tunnel:")
     print("  cloudflared tunnel run <tunnel-name>")
     print()
-    print(f"Default password: {APP_PASSWORD}")
-    print("(Set BIOTECH_APP_PASSWORD environment variable to change)")
+    print("Access requires the configured BIOTECH_APP_PASSWORD (any username).")
     print()
     print("=" * 70)
 
-    demo, custom_css, force_light_mode_js, theme = create_interface()
+    demo, custom_css, force_light_mode_js, theme = create_interface(authenticated_by_server=True)
     demo.queue(
         default_concurrency_limit=20,  # Allow 20 concurrent users (matches max_sessions)
         max_size=50  # Max queue size (waiting users)
     )
 
     demo.launch(
-        server_name=SERVER_HOST,
+        server_name=server_host,
         server_port=SERVER_PORT,
-        share=False,  # We'll use Cloudflare Tunnel instead
+        share=share,
+        auth=authenticate,
+        auth_message="Enter any username and the configured access password.",
         show_error=True,
         theme=theme,
         css=custom_css,

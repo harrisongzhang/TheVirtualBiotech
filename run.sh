@@ -78,10 +78,8 @@ activate_env() {
     # sub-agent tracing (and therefore attribution).
     export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-${SCRATCH:-$HOME}/claude-config}"
     mkdir -p "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
-    if [ -f "$SCRIPT_DIR/.env" ]; then
-        ANTHROPIC_API_KEY=$(grep '^ANTHROPIC_API_KEY=' "$SCRIPT_DIR/.env" | cut -d '=' -f2-)
-        export ANTHROPIC_API_KEY
-    fi
+    # Python entry points load .env with python-dotenv. Do not parse or source it
+    # here: shell parsing changes quoted values and can override exported keys.
     # Generate mcp_config.json for THIS environment: absolute interpreter + server
     # paths + isolation, so the SDK spawns each MCP server with the right Python.
     # A committed static config can't know where an installed env lives, so we
@@ -126,10 +124,15 @@ cmd_doctor() {
         fail=1
     fi
 
-    if [ -f "$SCRIPT_DIR/.env" ] && grep -q '^ANTHROPIC_API_KEY=' "$SCRIPT_DIR/.env"; then
-        echo "  [ok]   ANTHROPIC_API_KEY present in .env"
+    if "$PY" -c '
+import os, sys
+from dotenv import load_dotenv
+load_dotenv(".env", override=False)
+sys.exit(0 if os.environ.get("ANTHROPIC_API_KEY", "").strip() else 1)
+'; then
+        echo "  [ok]   ANTHROPIC_API_KEY configured in environment or .env"
     else
-        echo "  [FAIL] no ANTHROPIC_API_KEY in .env"; fail=1
+        echo "  [FAIL] no non-empty ANTHROPIC_API_KEY in environment or .env"; fail=1
     fi
 
     if [ -f "$SCRIPT_DIR/mcp_config.json" ]; then
@@ -163,16 +166,9 @@ cmd_web() {
     echo "" >&2
     echo "  The Virtual Biotech — web interface" >&2
     echo "  runs → $RUNS_DIR" >&2
-    echo "  password: ${BIOTECH_APP_PASSWORD:-<default in gradio_cso_app.py>}" >&2
     echo "" >&2
     case "${1:-}" in
-        --share)
-            "$PY" -c "
-import gradio_cso_app
-demo, css, js, theme = gradio_cso_app.create_interface()
-demo.queue()
-demo.launch(server_name='0.0.0.0', server_port=7860, share=True, show_error=True)
-" ;;
+        --share) "$PY" -c 'import gradio_cso_app; gradio_cso_app.main(share=True)' ;;
         *) "$PY" gradio_cso_app.py ;;
     esac
 }

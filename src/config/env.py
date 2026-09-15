@@ -4,10 +4,11 @@ The Virtual Biotech
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables from a .env file if present
-load_dotenv()
+# Always load this checkout's configuration and preserve exported values.
+load_dotenv(Path(__file__).resolve().parents[2] / '.env', override=False)
 
 
 class Config:
@@ -25,10 +26,10 @@ class Config:
 
     @classmethod
     def validate(cls):
-        """Validate required configuration. Called before data is loaded
+        """Validate reference configuration. Called before data is loaded
         (see src/data/loader.py), not at import time, so importing this module
         for inspection or lightweight tooling never crashes."""
-        if not cls.ANTHROPIC_API_KEY:
-            raise ValueError('ANTHROPIC_API_KEY not set in environment')
+        # Reading local reference data does not call the model API. Research
+        # entry points validate model credentials before starting the SDK.
         if not cls.OPEN_TARGETS_PATH:
             raise ValueError('OPEN_TARGETS_DATA_PATH not set in environment')

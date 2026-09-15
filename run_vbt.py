@@ -41,26 +41,30 @@ def _app():
 def _require_api_key(env_file: Path = None) -> None:
     """Fail with a useful message rather than the CLI's 'Not logged in'.
 
-    The key lives in .env and is exported by run.sh. Invoking this script
-    directly skips that, and the SDK then reports an authentication prompt that
-    gives no hint about the actual cause.
+    Load this checkout's .env using the same parsing as the web interface.
+    Import python-dotenv only for live runs, so audit-only commands remain
+    usable without the application dependencies.
 
     ``env_file`` is a parameter so the missing-key path can be tested in a
     checkout that does have a .env.
     """
     import os
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    if os.environ.get("ANTHROPIC_API_KEY", "").strip():
         return
     env_file = Path(__file__).parent / ".env" if env_file is None else Path(env_file)
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            if line.startswith("ANTHROPIC_API_KEY="):
-                value = line.split("=", 1)[1].strip()
-                if value:
-                    os.environ["ANTHROPIC_API_KEY"] = value
-                    return
-    print(f"error: ANTHROPIC_API_KEY is not set, and {env_file} does not define it.\n"
-          "       Run through ./run.sh, which loads it, or export it yourself.\n"
+    if env_file.is_file():
+        try:
+            from dotenv import load_dotenv
+        except ImportError:
+            print("error: python-dotenv is required to load the project's .env.\n"
+                  "       Activate the configured application environment or export "
+                  "ANTHROPIC_API_KEY before starting a live run.", file=sys.stderr)
+            sys.exit(2)
+        load_dotenv(env_file, override=False)
+    if os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        return
+    print("error: ANTHROPIC_API_KEY is not configured with a non-empty value.\n"
+          f"       Set it in {env_file} or export it before running ./run.sh.\n"
           "       (Without it the SDK reports 'Not logged in', which does not say why.)",
           file=sys.stderr)
     sys.exit(2)
