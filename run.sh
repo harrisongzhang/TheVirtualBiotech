@@ -16,10 +16,11 @@
 #   ./run.sh verify <RUN_ID> [--rerun]  re-hash artifacts; --rerun re-executes code
 #   ./run.sh audit <session_dir>        rebuild an audit trail for an old session
 #   ./run.sh index                      rebuild runs/INDEX.md
-#   ./run.sh doctor                     check the environment before anything else
+#   ./run.sh doctor [--skip-api-key] [--smoke]  check local setup; no model requests
 #   ./run.sh test                       run the audit test suite
 #
 # Environment:
+#   GRADIO_SERVER_PORT     web port (default: 7860)
 #   BIOTECH_APP_PASSWORD   web access password
 #   VBT_RUNS_DIR           where runs are written (default: ./runs)
 #   CLAUDE_CONFIG_DIR      SDK config/transcripts (must be writable by you)
@@ -38,8 +39,7 @@ export VBT_RUNS_DIR="$RUNS_DIR"
 # reference unset variables and return non-zero on a missing env, either of
 # which would take this whole script down under `set -euo pipefail`.
 source_activate() {
-    # activate.local.sh wins when present: the checked-in activate.sh points at
-    # one person's conda env, which other accounts cannot read.
+    # activate.local.sh wins when present for machine-specific activation.
     local script="$SCRIPT_DIR/activate.sh"
     [ -f "$SCRIPT_DIR/activate.local.sh" ] && script="$SCRIPT_DIR/activate.local.sh"
     [ -f "$script" ] || return 0
@@ -91,71 +91,12 @@ activate_env() {
 # ── doctor ───────────────────────────────────────────────────────────
 
 cmd_doctor() {
-    local fail=0
-    echo "The Virtual Biotech — environment check"
-    echo "======================================================================"
-    echo "repo:        $SCRIPT_DIR"
-    echo "runs:        $RUNS_DIR"
-
     if ! source_activate 2>/dev/null; then
         echo "  [FAIL] activate.sh did not complete — the conda env is not usable."
-        echo "         Everything below reflects the ambient Python instead."
-        fail=1
+        return 1
     fi
-    resolve_python || fail=1
-    echo "python:      ${PY:-NOT FOUND} ($(command -v "${PY:-python}" 2>/dev/null))"
-    "$PY" -c 'import sys; print("version:     " + sys.version.split()[0])' 2>/dev/null || fail=1
-
-    for mod in gradio claude_agent_sdk fastmcp pandas; do
-        if "$PY" -c "import $mod" 2>/dev/null; then
-            echo "  [ok]   $mod"
-        else
-            echo "  [MISSING] $mod"; fail=1
-        fi
-    done
-
-    local cfg="${CLAUDE_CONFIG_DIR:-${SCRATCH:-$HOME}/claude-config}"
-    if mkdir -p "$cfg" 2>/dev/null && [ -w "$cfg" ]; then
-        echo "  [ok]   CLAUDE_CONFIG_DIR writable ($cfg)"
-    else
-        echo "  [FAIL] CLAUDE_CONFIG_DIR not writable ($cfg)"
-        echo "         Sub-agent transcripts land here; without it, agent"
-        echo "         attribution in the audit trail silently degrades."
-        fail=1
-    fi
-
-    if "$PY" -c '
-import os, sys
-from dotenv import load_dotenv
-load_dotenv(".env", override=False)
-sys.exit(0 if os.environ.get("ANTHROPIC_API_KEY", "").strip() else 1)
-'; then
-        echo "  [ok]   ANTHROPIC_API_KEY configured in environment or .env"
-    else
-        echo "  [FAIL] no non-empty ANTHROPIC_API_KEY in environment or .env"; fail=1
-    fi
-
-    if [ -f "$SCRIPT_DIR/mcp_config.json" ]; then
-        local n; n=$("$PY" -c "import json;print(len(json.load(open('mcp_config.json'))['mcpServers']))" 2>/dev/null || echo 0)
-        echo "  [ok]   mcp_config.json — $n servers"
-        "$PY" -c "
-import json,sys
-c=json.load(open('mcp_config.json'))['mcpServers']
-if 'provenance' not in c:
-    print('  [warn] provenance MCP not registered — run: python setup_mcp.py')
-" 2>/dev/null || true
-    else
-        echo "  [FAIL] mcp_config.json absent — run: python setup_mcp.py"; fail=1
-    fi
-
-    echo "======================================================================"
-    if [ "$fail" -eq 0 ]; then
-        echo "PASS — ready to run."
-    else
-        echo "FAIL — fix the items above before running. Audit tooling"
-        echo "(audit / verify / index / test) works regardless."
-    fi
-    return "$fail"
+    resolve_python || return 1
+    "$PY" "$SCRIPT_DIR/tools/doctor.py" "$@"
 }
 
 # ── Commands ─────────────────────────────────────────────────────────

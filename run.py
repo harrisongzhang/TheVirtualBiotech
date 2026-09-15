@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
+from src.config.models import DEFAULT_MODEL_ID, MODEL_HELP, model_argument
 
 load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
@@ -864,15 +865,10 @@ def main():
     )
     parser.add_argument(
         "--model",
-        default="claude-sonnet-4-5-20250929",
-        metavar="ANTHROPIC_MODEL_ID",
-        help=(
-            "Anthropic API model ID for the CSO and its specialist agents "
-            "(default: claude-sonnet-4-5-20250929). Accepts any current model ID "
-            "from https://platform.claude.com/docs/en/about-claude/models/overview "
-            "(e.g. claude-opus-4-6). The chief-of-staff and scientific-reviewer "
-            "agents always run on Haiku."
-        ),
+        default=DEFAULT_MODEL_ID,
+        type=model_argument,
+        metavar="MODEL",
+        help=MODEL_HELP,
     )
     args = parser.parse_args()
     from run_vbt import _require_api_key

@@ -2,13 +2,25 @@
 
 A multi-agent AI system for pharmaceutical target identification and due diligence, built on the Claude Agent SDK. A Chief Scientific Officer (CSO) agent orchestrates a pool of specialist agents — each with access to curated biomedical databases via Model Context Protocol (MCP) servers — to answer arbitrary drug discovery and target biology queries.
 
+Start with the [Quickstart](QUICKSTART.md) for a complete installation and two CLI examples.
+
 ---
 
 ## Setup
 
 ### 1. Create the conda environment
 
-Install Conda first and run these commands from the repository root:
+Install Git and [Miniforge (Conda)](https://github.com/conda-forge/miniforge#install).
+Open a terminal with Conda available (the Miniforge Prompt on Windows). If
+`conda activate` asks you to initialize your shell, run `conda init` and reopen
+that terminal. Then clone the repository:
+
+```bash
+git clone https://github.com/harrisongzhang/TheVirtualBiotech.git
+cd TheVirtualBiotech
+```
+
+Run all subsequent commands from this repository root:
 
 ```bash
 conda env create -f environment.yml
@@ -72,25 +84,50 @@ without downloading it. No API key is needed for downloading or local data
 checks. Loading large datasets into memory can require substantially more RAM
 than their compressed file size.
 
+The downloader announces inventory discovery immediately and prints progress
+at least every 10 seconds while downloading/verifying. It shows validated
+files, bytes in active transfers (including resumed bytes), bytes received
+this invocation (including retries), and elapsed time. A file becomes validated
+only after its transfer and checks finish.
+
+A separate Linux x86_64 installation on 15 September 2026 measured:
+
+| Resource | Observed usage |
+|---|---|
+| Open Targets 25.09 archive | 28.99 GiB |
+| Installed Conda environment | About 5.4 GiB, plus package caches and outputs |
+| Largest process in target/DepMap smoke queries | About 9.8 GiB resident RAM |
+| Data download on the test server | About 28 minutes, including an interruption/resume test, with 8 then 16 workers |
+
+These are measurements, not minimum requirements or promised timings. Concurrent
+specialist queries can consume more RAM than a single query. Allow disk space
+for caches and research outputs beyond the archive and environment.
+
 **Tahoe-100M drug perturbation data (optional — enables the Tahoe functional-genomics tools)**
 
-The functional genomics MCP server's drug-perturbation tools use Tahoe-100M pseudobulk differential expression results. These are **not distributed with this repository** — obtain your own copy of the DE results from the [Tahoe-100M dataset](https://www.biorxiv.org/content/10.1101/2024.04.09.588750) and point `TAHOE_DATA_PATH` at them. Without `TAHOE_DATA_PATH` set, the DepMap essentiality tools still work; only the Tahoe drug-perturbation tools are inactive. The loader expects the following layout under `TAHOE_DATA_PATH`:
-
-```
-tahoe/data/
-├── tahoe_permissive_padj010.parquet       # permissive pseudobulk DE (padj < 0.10)
-├── pseudobulk_de_significant/             # significant (padj < 0.05)
-├── pseudobulk_de_high_quality/            # high quality (padj < 0.05, |FC| > 0.5)
-└── metadata/
-    ├── gene_metadata.parquet
-    ├── drug_metadata.parquet
-    ├── cell_line_metadata.parquet
-    └── sample_metadata.parquet
-```
+The [official Tahoe-100M dataset](https://huggingface.co/datasets/tahoebio/Tahoe-100M)
+provides pseudobulk differential-expression results. Follow the
+[Tahoe download and preparation recipe](docs/TAHOE_SETUP.md) to create the
+filtered files expected by this loader with `tools/prepare_tahoe.py`, then set
+`TAHOE_DATA_PATH` to that prepared directory. The recipe pins a source revision
+and defines the exact adjusted-p-value and log2-fold-change thresholds.
+Without Tahoe, the DepMap essentiality tools still work.
 
 ### 3. Set environment variables
 
-Environment variables can be set in a `.env` file in the project root (loaded automatically via `python-dotenv`) or exported in your shell. Quoted values are supported; exported variables take precedence over `.env` values. Keep `.env` private; it is excluded from Git.
+Create your local configuration from the supplied template:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` in the project root. Use absolute data paths and enter your own
+`ANTHROPIC_API_KEY`; the web UI also needs `BIOTECH_APP_PASSWORD`. The app loads
+this file automatically. It is excluded from Git. Quoted values are supported.
+The examples below are **file entries**, not shell exports. To configure the
+shell instead, use `export ANTHROPIC_API_KEY="..."` and
+`export OPEN_TARGETS_DATA_PATH="/absolute/path/to/open_targets"`.
+Exported variables take precedence over `.env`, including explicitly empty values.
 
 **Two kinds of paths — don't confuse them:**
 
@@ -132,9 +169,24 @@ This generates `mcp_config.json` for the active interpreter and checkout. It is
 machine-specific and excluded from Git; regenerate it after moving the checkout,
 changing environments or switching to Apptainer. The setup reports 12 servers.
 
-On systems with Bash, `bash run.sh doctor` checks the environment, model key and
-MCP configuration. For a different Conda installation or environment name,
-use the documented `activate.local.sh` override in `activate.sh`.
+Check the local installation before making a model request:
+
+```bash
+python tools/doctor.py --skip-api-key --smoke
+```
+
+This checks dependencies, all 38 reference-data directories, file readability
+and sizes, the download manifest when present, and the generated MCP paths.
+`--smoke` also reads one local disease record and initializes all 12 MCP servers;
+it does not load the large analysis tables or call a model/external data API.
+The doctor checks layout and sizes; rerunning the downloader rechecks SHA-256
+hashes. After adding your key, run `python tools/doctor.py` to include key-presence
+validation. A passing result does not validate model authentication or billing.
+
+On systems with Bash, `./run.sh doctor --skip-api-key --smoke` runs the same checks
+and activates the environment for you. For a separate environment, use
+`VBT_ENV=/absolute/path/to/env ./run.sh doctor --skip-api-key --smoke`, or the
+`activate.local.sh` override described in `activate.sh`.
 
 The application regression tests can be run without model requests:
 
@@ -199,61 +251,57 @@ apptainer test vbt.sif
 
 ## Running the CLI
 
+Live queries require `ANTHROPIC_API_KEY` and the reference data configured above.
+They make billable model requests. See the [two quickstart examples](QUICKSTART.md#two-cli-examples).
+
+| Interface | Start command | Output |
+|---|---|---|
+| Interactive terminal | `python run.py` | `sessions/<timestamp>/` |
+| Headless question/conversation | `./run.sh run "<query>"` | `runs/<RUN_ID>/` |
+| Headless without Bash | `python run_vbt.py run "<query>"` | `runs/<RUN_ID>/` |
+
+Activate the environment and run `python setup_mcp.py` before using the Python
+entry points. `run.sh` handles activation and MCP configuration automatically.
+Regenerate `mcp_config.json` after moving the checkout or changing environments.
+
+Both CLIs accept the same model IDs and quoted display labels:
+
 ```bash
-conda activate vbt
-python3 setup_mcp.py     # once per environment — writes mcp_config.json
-python3 run.py
+python run.py --model claude-opus-4-6
+./run.sh run --model claude-opus-4-6 "Summarize the genetic evidence for OSMR in ulcerative colitis."
+# The label --model "Opus 4.6" selects the same model.
 ```
 
-`setup_mcp.py` records this environment's absolute interpreter and MCP server
-paths in `mcp_config.json`; `run.py` reads that file at startup and cannot run
-without it. Re-run it after moving the checkout or rebuilding the environment.
-`source activate.sh` and `./run.sh` do this step for you.
+The default is `claude-sonnet-4-5-20250929`. The chief-of-staff and scientific-reviewer
+always use Haiku. Run either CLI with `--help` to see the available labels.
+Unrecognized labels fail immediately. Model IDs starting with `claude-` are
+forwarded unchanged for Anthropic to validate; unavailable IDs produce an API
+error instead of silently selecting another model. See the
+[Anthropic model catalog](https://platform.claude.com/docs/en/about-claude/models/overview).
 
-By default the CSO and its specialist agents run on `claude-sonnet-4-5-20250929`.
-Pass `--model` with any current [Anthropic API model ID](https://platform.claude.com/docs/en/about-claude/models/overview)
-to change it — this sets the CSO, and the specialists inherit it (the `chief-of-staff`
-and `scientific-reviewer` agents always run on Haiku):
+### Interactive commands and outputs
 
-```bash
-python3 run.py --model claude-opus-4-6
-```
+After `python run.py` starts, type a question at the `You:` prompt. For multi-line
+input, enter a line containing `"""`, then your question, then another `"""` line.
 
-Each run creates a new timestamped session directory under `sessions/`.
-
-### Interactive commands
-
-Once the session starts and the CSO is ready:
-
-```
-You: Evaluate CD276 (B7-H3) as an immunotherapy target in NSCLC
-
-# Multi-line input
-You: """
-Analyze OSMR as a target for ulcerative colitis:
-1. Expression in disease-relevant cell types
-2. Genetic evidence from GWAS
-3. Existing drug modalities
-"""
-
+```text
 /summary   — print per-turn cost and agent breakdown
-/done      — end session and write output files
+/done      — end the session and write output files
 /help      — show available commands
 Ctrl+C     — graceful exit, writes output files
 ```
 
-### Session outputs
+Each interactive session writes `session_report.json`, `transcript.md`,
+`trace.jsonl`, and agent files under `workspace/` in `sessions/<timestamp>/`.
 
-Each session creates a timestamped directory under `sessions/`:
+### Headless commands and outputs
 
-```
-sessions/
-└── 20260524_103000/
-    ├── session_report.json   # Full structured data: turns, costs, agent traces
-    ├── transcript.md         # Human-readable conversation with reasoning traces
-    ├── trace.jsonl           # Fine-grained event log (tool calls, sub-agent I/O)
-    └── workspace/            # Files written by agents during the session
-```
+Pass one quoted argument per conversation turn, or use `-f questions.txt` for
+one turn per nonempty line. The runner prints the run ID and paths to its
+`README.md` and `audit.html`. Research artifacts are organized under
+`runs/<RUN_ID>/work/`; logs and evidence have their own subdirectories.
+Use that printed ID with `./run.sh verify <RUN_ID>` to check the recorded artifacts.
+The interactive `sessions/` layout is separate from the headless/web `runs/` layout.
 
 ---
 
@@ -268,7 +316,10 @@ python gradio_cso_app.py
 ```
 
 Open `http://127.0.0.1:7860` and sign in with any username and your configured
-password. Research requests require `ANTHROPIC_API_KEY` and the reference-data
+password. If 7860 is occupied, set `GRADIO_SERVER_PORT="17860"` in `.env`, or
+launch with `GRADIO_SERVER_PORT=17860 python gradio_cso_app.py` and open
+`http://127.0.0.1:17860`. The app continues to bind to localhost by default.
+Research requests require `ANTHROPIC_API_KEY` and the reference-data
 path from setup step 3. On systems with Bash, `bash run.sh web` activates the
 environment, regenerates the MCP configuration and starts the same interface.
 

@@ -1,134 +1,150 @@
 # Quickstart
 
+Live research needs Git, [Miniforge (Conda)](https://github.com/conda-forge/miniforge#install),
+an Anthropic API key, and the Open Targets reference data. Start in a terminal
+where `conda` is available. If activation asks for shell initialization, run
+`conda init` and reopen the terminal.
+
+Allow about 29 GiB for the reference data, plus the environment, package caches
+and outputs. Our separate Linux installation used about 5.4 GiB for the
+environment; one target/DepMap query process reached about 9.8 GiB of RAM.
+Concurrent analyses can need more. See [measured resources](README.md#2-obtain-the-data).
+
+## Install and check
+
+Run these commands from the repository root after cloning:
+
 ```bash
 git clone https://github.com/harrisongzhang/TheVirtualBiotech.git
 cd TheVirtualBiotech
+conda env create -f environment.yml
+conda activate vbt
 ```
 
-## What runs where
+The SDK bundles the Claude Code CLI; a separate CLI installation is normally
+unnecessary. For troubleshooting or Apptainer, see [full setup](README.md#setup).
 
-| Task | Requirements |
-|---|---|
-| Audit tooling and its tests, reading a past run | Python 3.10+, no model key or reference data |
-| CLI and Gradio research | Conda environment, model key, reference data and enough memory for the analysis |
-
-The complete Open Targets 25.09 archive is approximately 29 GiB on disk and is
-downloaded separately. Allow additional disk space for the environment and
-outputs; loaded tables can require substantially more memory than their
-compressed files. An HPC cluster is optional: live runs can use a workstation
-or server with sufficient resources. See [setup](README.md#setup) for the data
-downloader and environment checks.
-
----
-
-## On a laptop — the audit tooling
-
-Everything here is stdlib-only. No install, no API key, no configuration.
-
-### Run the tests
+Choose an absolute destination for the data and use it in both the download
+command and `.env` below. Replace `/absolute/path/to/open_targets` with that path:
 
 ```bash
-python3 tests/test_audit_spine.py       # manifest, provenance, claim validation
-python3 tests/test_run_lifecycle.py     # a full run, end to end
-python3 tests/test_claim_ui.py          # claim markers and the evidence panel
-python3 tests/test_plan_and_verify.py   # plan DAG, tamper detection, re-execution
-python3 tests/test_regressions.py       # regressions caught on live runs
+python tools/download_open_targets.py /absolute/path/to/open_targets --workers 8
+cp .env.example .env
 ```
 
-Some tests assert against a real recorded session and skip automatically when it
-is not reachable (set `VBT_TEST_SESSION` to a recorded session directory to run
-them). The rest run anywhere.
+On Windows Command Prompt, use `copy .env.example .env`. The download retrieves
+3,508 Parquet files in 38 datasets. It announces discovery immediately, then
+reports transfer/verification progress every 10 seconds. Our server took about
+28 minutes; connection speed and storage affect timing. Rerun the same command
+to resume an interruption.
 
-### Audit an old flat session
+Edit `.env` in the project root with your data path and key:
 
-The retrofit tool rebuilds an audit trail for sessions that predate the run
-layout, from their `trace.jsonl` alone:
+```dotenv
+OPEN_TARGETS_DATA_PATH="/absolute/path/to/open_targets"
+ANTHROPIC_API_KEY="your-anthropic-api-key"
+BIOTECH_APP_PASSWORD="choose-your-own-web-password"
+```
+
+These are **file entries**. The app loads `.env` automatically; exported shell
+variables take precedence, including empty ones. The web password is needed
+only for Gradio. You can leave the API key blank while testing the local setup.
+Tahoe is optional; its separate [download/preparation recipe](docs/TAHOE_SETUP.md)
+enables drug-perturbation tools. DepMap works without Tahoe.
 
 ```bash
+python setup_mcp.py
+python tools/doctor.py --skip-api-key --smoke
+```
+
+Expect 38 data directories, 12 MCP servers, and `PASS`. The smoke check reads
+one disease record and initializes the servers without a model request or
+external data query. It checks local file layout/sizes, not all table contents;
+rerunning the downloader verifies SHA-256 hashes. After setting your key, run
+`python tools/doctor.py` to check key presence too. Neither command verifies
+model authentication or billing.
+
+Activate `vbt` in each new terminal. Regenerate `mcp_config.json` with
+`python setup_mcp.py` after moving the checkout or changing environments.
+On systems with Bash, `./run.sh doctor --skip-api-key --smoke` handles both
+activation and MCP configuration. For another environment, set
+`VBT_ENV=/absolute/path/to/env` before using `run.sh`.
+
+## Two CLI examples
+
+Both examples make billable model requests and need the key and data above.
+
+**1. Interactive conversation:**
+
+```bash
+python run.py
+```
+
+At the `You:` prompt, enter `Look up OSMR and summarize its function and tractability.`
+Ask follow-up questions in the same session, then type `/done` to save and exit.
+The transcript, trace and report are saved in `sessions/<timestamp>/`.
+
+**2. Headless question with an explicit model:**
+
+```bash
+python run_vbt.py run --model claude-opus-4-6 "Summarize the genetic evidence linking OSMR to ulcerative colitis."
+```
+
+The command prints a run ID and report paths under `runs/<RUN_ID>/`.
+Use `python run_vbt.py verify <RUN_ID>` with that printed ID to check the recorded
+artifacts. With Bash, `./run.sh run ...` is the same headless interface and
+activates the environment for you.
+
+Both CLIs accept Claude model IDs or quoted labels such as `--model "Opus 4.6"`.
+The default is `claude-sonnet-4-5-20250929`; the chief-of-staff and
+scientific-reviewer use Haiku. Unknown labels fail immediately, and model IDs
+are forwarded unchanged for Anthropic to validate. See `python run.py --help`
+or `python run_vbt.py run --help` for labels and options.
+
+## Web interface
+
+```bash
+python gradio_cso_app.py
+```
+
+Open `http://127.0.0.1:7860` and log in with any username and the configured
+`BIOTECH_APP_PASSWORD`. If the port is occupied, add `GRADIO_SERVER_PORT="17860"`
+to `.env`, restart, and open `http://127.0.0.1:17860`. The default bind address
+remains localhost. The Bash equivalent is `./run.sh web`.
+
+For a remote server, forward its port from your laptop:
+
+```bash
+ssh -L 17860:localhost:17860 <you>@<server>
+# Then open http://localhost:17860, if the app uses 17860 on the server.
+```
+
+## Audit tooling without a model key
+
+Reading/verifying existing runs and the audit-specific tests need only Python
+3.10+; they do not require the Conda environment, reference data or model access.
+
+```bash
+python3 tests/test_audit_spine.py
+python3 tests/test_run_lifecycle.py
+python3 tests/test_claim_ui.py
+python3 tests/test_plan_and_verify.py
+python3 tests/test_regressions.py
 python3 tools/audit_run.py /path/to/old-session -o ./audits
-# then open audits/<id>/audit.html in a browser
 ```
 
-Sessions with no `trace.jsonl` cannot be audited — the report says so rather than
-rendering a plausible-looking empty one.
+The retrofit tool builds `audits/<id>/audit.html` from an old session's
+`trace.jsonl`. Sessions without that trace cannot be audited. Some tests need
+a recorded session and skip when it is absent; set `VBT_TEST_SESSION` to a
+session directory to enable them. In the application environment, run the
+complete suite with `python -m unittest discover -s tests`.
 
-### Where to read
+`verify` re-hashes artifacts and re-resolves claims. Adding `--rerun` also
+executes the recorded analysis code and compares outputs by filename; it does
+not guarantee that every original output is regenerated. `replay <RUN_ID>`
+submits the same conversation to the recorded models and compares the result.
+It makes new model requests, and stochastic sampling can change the trajectory.
 
-- `README.md` — architecture, setup, and the data sources
-- `src/utils/run_manifest.py` — the run layout and artifact registry
-- `src/utils/provenance.py` — how "who produced what" is reconstructed
-- `src/utils/claims.py` — the claim-evidence object and its validator
-- `.claude/skills/run-organization/` — the standard the CSO is held to
-
----
-
-## Live CLI and Gradio runs
-
-### Setup
-
-Create the pinned environment once (see `README.md` for full detail):
-
-```bash
-conda env create -f environment.yml     # creates the `vbt` conda env
-# or build the container:                apptainer build vbt.sif vbt.def
-```
-
-For the container, invoke it with `apptainer exec --pwd /workspace` (not
-`apptainer run`) — see `README.md`.
-
-Live runs need the **Claude Code CLI**, which the pinned `claude-agent-sdk` wheel bundles — normally there is nothing extra to install. If the SDK reports `CLINotFoundError`, install it yourself with `curl -fsSL https://claude.ai/install.sh | bash` (no Node.js required), or see the [setup guide](https://code.claude.com/docs/en/setup). The audit tooling / tests / `verify` need no CLI at all.
-
-Put your key and data paths in a `.env` file (see `README.md` for the full list):
-`ANTHROPIC_API_KEY`, `OPEN_TARGETS_DATA_PATH`, and the optional data locations.
-Gradio also requires an explicitly configured access password:
-
-```bash
-BIOTECH_APP_PASSWORD="choose-your-own"
-```
-
-Enter any username and this password on the Gradio login form. The CLI does
-not require the web password. Then:
-
-```bash
-source activate.sh      # activates the `vbt` env, configures the MCP servers
-./run.sh doctor         # checks interpreter, packages, CLAUDE_CONFIG_DIR, API key, MCP config
-```
-
-`activate.sh` and `run.sh` both run `setup_mcp.py` for you, which writes the
-`mcp_config.json` this environment needs. Activating conda by hand instead? Run
-`python setup_mcp.py` once yourself — `run.py` will not start without it.
-
-`doctor` says PASS or names what is missing. The audit commands
-(`verify` / `audit` / `index` / `test`) work even when the conda env does not.
-
-### Running
-
-```bash
-./run.sh web                          # web interface on 127.0.0.1:7860
-./run.sh run "<query>"                # one headless run
-./run.sh verify <RUN_ID>              # re-hash artifacts, re-resolve claims
-./run.sh verify <RUN_ID> --rerun      # also re-execute the analysis code
-./run.sh replay <RUN_ID>              # re-run the same turns, then diff
-./run.sh audit <session_dir>          # retrofit an old flat session
-./run.sh index                        # rebuild runs/INDEX.md
-```
-
-Open `http://127.0.0.1:7860` when Gradio runs on your own machine. If it runs on
-a remote cluster node, forward its private port to your laptop:
-
-```bash
-ssh -J <you>@<login-node> -L 7860:localhost:7860 <you>@<compute-node>
-# then open http://localhost:7860
-```
-
-### Two guarantees, kept apart
-
-`verify` re-hashes every artifact; with `--rerun` it also re-executes the
-agent-written analysis code and compares the regenerated outputs (matched by
-filename) against the originals — ordinary deterministic Python. It checks the
-outputs a rerun *does* produce; it is not a guarantee that every original output
-is regenerated.
-
-`replay` is **trajectory-level**: the same turns against the same pinned models,
-prompt hashes and MCP servers, then a diff. LLM sampling is stochastic, so this
-is a comparison, not a reproduction — the tool says so in its own output.
+See [README.md](README.md) for architecture and configuration,
+`src/utils/run_manifest.py` for output layout, and `.claude/skills/run-organization/`
+for the run-organization instructions given to the CSO.

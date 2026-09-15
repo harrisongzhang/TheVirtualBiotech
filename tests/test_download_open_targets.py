@@ -98,14 +98,52 @@ class DownloadTests(unittest.TestCase):
     def test_partial_resume_checks_range_and_preserves_validator(self):
         partial = self.partial(self.data[:7])
         headers = {"Content-Range": f"bytes 7-{len(self.data)-1}/{len(self.data)}"}
+        progress = archive.Progress(1)
         with patch.object(archive, "urlopen", return_value=Response(self.data[7:], 206, headers)) as request:
-            self.assertEqual(self.download(), self.metadata)
+            self.assertEqual(archive.download(self.root, self.relative, self.url, None, progress=progress), self.metadata)
+        self.assertEqual(progress.received, len(self.data) - 7)
+        self.assertEqual(progress.active, {})
         sent = request.call_args.args[0]
         self.assertEqual(sent.get_header("Range"), "bytes=7-")
         self.assertEqual(sent.get_header("If-range"), '"archive-file"')
         self.assertEqual(self.target.read_bytes(), self.data)
         self.assertFalse(partial.exists())
         self.assertFalse(partial.with_name(partial.name + ".json").exists())
+
+    def test_progress_is_printed_while_a_file_is_still_transferring(self):
+        waiting, reported = threading.Event(), threading.Event()
+        progress = archive.Progress(1, interval=0.01)
+        original_report = progress.report
+        output = io.StringIO()
+
+        def report():
+            original_report()
+            if waiting.is_set():
+                reported.set()
+
+        class SlowResponse(Response):
+            def read(self, size=-1):
+                if self.data.tell() == 1024**2:
+                    waiting.set()
+                    if not reported.wait(5):
+                        raise AssertionError("No progress was reported during the transfer")
+                return super().read(size)
+
+        data = parquet_bytes(b"x" * 2 * 1024**2)
+        with patch.object(archive, "urlopen", return_value=SlowResponse(data)), \
+                patch.object(progress, "report", side_effect=report), patch("sys.stdout", output):
+            progress.thread.start()
+            try:
+                result = archive.download(self.root, self.relative, self.url, None, progress=progress)
+            finally:
+                progress.close()
+        self.assertIn("validated 0/1 files", output.getvalue())
+        self.assertIn("1 active files (1.0 MiB so far)", output.getvalue())
+        self.assertIn("received 1.0 MiB this run", output.getvalue())
+        self.assertEqual(result["bytes"], len(data))
+        self.assertEqual(progress.received, len(data))
+        self.assertEqual(progress.active, {})
+        self.assertFalse(progress.thread.is_alive())
 
     def test_ignored_range_replaces_instead_of_appending(self):
         self.partial(self.data[:8])
@@ -280,7 +318,7 @@ class InventoryAndManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             files = [(f"disease/{number}.parquet", archive.BASE + f"disease/{number}.parquet") for number in range(50)]
             started = []
-            def download(_root, _name, _url, _previous, stop):
+            def download(_root, _name, _url, _previous, stop, progress=None):
                 started.append(stop)
                 self.assertTrue(stop.wait(2), "Coordinator did not signal cancellation")
                 raise archive.DownloadCancelled()
@@ -307,7 +345,7 @@ class InventoryAndManifestTests(unittest.TestCase):
             context = {}
             original_download, original_checksum = archive.download, archive.checksum
 
-            def download(root, name, url, previous, stop):
+            def download(root, name, url, previous, stop, progress=None):
                 context["stop"] = stop
                 return original_download(root, name, url, previous, stop)
 

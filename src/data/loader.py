@@ -5,7 +5,7 @@ Manages loading and caching of Open Targets datasets
 Strategy:
 - Pre-load ALL datasets at initialization
 - OS cache warmup (via warmup_data.py) makes this fast (~10s)
-- Cache everything in memory (650GB RAM available, only need ~7GB)
+- Data is cached per process; RAM use depends on the datasets queried
 - Tahoe datasets use PyArrow lazy loading (too large for memory)
 """
 
@@ -16,6 +16,7 @@ from typing import Dict, Optional, List, Union
 import pandas as pd
 import pyarrow.dataset as ds
 from src.config.env import Config
+from src.config.datasets import OPEN_TARGETS_DATASETS
 
 logger = logging.getLogger(__name__)
 
@@ -43,69 +44,7 @@ class OpenTargetsDataLoader:
         self._load_times: Dict[str, float] = {}
 
         # All datasets to pre-load
-        self._datasets_to_preload: List[str] = [
-            # Original datasets (4.42 GB)
-            "target",                              # 0.07 GB - Target annotations
-            "credible_set",                        # 2.41 GB - GWAS credible sets
-            "l2g_prediction",                      # 0.29 GB - Locus-to-gene predictions
-            "expression",                          # 1.24 GB - GTEx expression
-            "target_essentiality",                 # 0.38 GB - Depmap essentiality
-            "known_drug",                          # 0.02 GB - Known drugs
-            "drug_mechanism_of_action",            # 0.01 GB - Drug mechanisms
-
-            # Phase 1: Disease datasets (~5-10 MB)
-            "disease",                             # ~5 MB - Disease ontology
-            "disease_phenotype",                   # ~2 MB - Disease-HPO phenotype mappings
-            "disease_hpo",                         # ~1 MB - HPO term definitions
-
-            # Phase 1: Pathway datasets (NOTE: pathway/GO data is in target dataset, not separate)
-            # "reactome",                          # Not needed - data in target.pathways
-            # "go",                                # Not needed - data in target.go
-
-            # Phase 1: Association datasets (~0.2 GB)
-            "association_overall_direct",          # ~29 MB - Direct associations
-            "association_by_overall_indirect",     # ~88 MB - Indirect associations
-            "association_by_datatype_direct",      # ~50 MB (est) - By datatype
-            "association_by_datatype_indirect",    # ~100 MB (est) - By datatype indirect
-            "association_by_datasource_direct",    # ~60 MB (est) - By datasource
-            "association_by_datasource_indirect",  # ~120 MB (est) - By datasource indirect
-
-            # Phase 2: Extended genetics datasets (~6.1 GB)
-            "variant",                             # 3.0 GB - Variant annotations
-            "study",                               # 89 MB - GWAS study metadata
-            "interval",                            # 3.0 GB - Enhancer-gene regulatory regions
-
-            # Phase 2: Extended expression datasets (~0.5 MB)
-            "biosample",                           # ~0.5 MB - Biosample/tissue ontology
-
-            # Phase 2: Extended target datasets - drugs and safety (~0.8 GB)
-            "drug_molecule",                       # ~400 MB - Drug properties, clinical phases
-            "drug_indication",                     # ~200 MB - Disease indications, trial phases
-            "drug_warning",                        # ~50 MB - Safety warnings
-            "openfda_significant_adverse_target_reactions",  # ~100 MB - Target-level adverse events
-            "openfda_significant_adverse_drug_reactions",    # ~2.5 MB - Drug-level adverse events
-            "target_prioritisation",               # ~30 MB - Multi-factor target scoring
-            "mouse_phenotype",                     # ~20 MB - Mouse knockout phenotypes
-            "pharmacogenomics",                    # ~10 MB - PGx relationships
-
-            # Phase 3: Ontology references for pathway_mcp (~5 MB)
-            "go",                                  # ~2 MB - Gene Ontology term definitions
-            "reactome",                            # ~2 MB - Reactome pathway hierarchy
-            "so",                                  # ~1 MB - Sequence Ontology terms
-
-            # Phase 3: Interaction data for interaction_mcp (~371 MB)
-            "interaction",                         # ~87 MB - Protein-protein interactions
-            "interaction_evidence",                # ~284 MB - Interaction evidence details
-
-            # Phase 3: Colocalisation data for genetics_mcp (~8.6 GB)
-            "colocalisation_coloc",                # ~3.7 GB - COLOC method colocalisation
-            "colocalisation_ecaviar",              # ~4.9 GB - eCAVIAR method colocalisation
-
-            # Phase 3: Evidence and literature for association_mcp (~10.6 GB)
-            "evidence",                            # ~8.4 GB - Detailed evidence strings
-            "literature",                          # ~2.2 GB - Publication metadata
-            "literature_vector",                   # Document embeddings for similarity search
-        ]
+        self._datasets_to_preload = list(OPEN_TARGETS_DATASETS)
 
         if preload_all:
             self._preload_all_datasets()
@@ -145,7 +84,7 @@ class OpenTargetsDataLoader:
 
         logger.info("=" * 70)
         logger.info(f"✅ All datasets loaded in {total_time:.2f}s")
-        logger.info(f"📊 Memory usage: {memory_gb:.2f}GB / 650GB available ({memory_gb/650*100:.1f}%)")
+        logger.info(f"📊 DataFrame-reported memory: {memory_gb:.2f} GiB (resident memory may be higher)")
         logger.info(f"📦 Datasets cached: {len(self._cache)}/{len(self._datasets_to_preload)}")
         logger.info("=" * 70)
 
@@ -309,14 +248,14 @@ class OpenTargetsDataLoader:
         """
         Get Tahoe PyArrow dataset (lazy loading - not loaded into memory)
 
-        Tahoe datasets are too large for in-memory caching (4-66 GB each).
+        Tahoe datasets are queried lazily to avoid caching full tables in memory.
         Returns PyArrow Dataset for efficient filtered queries.
 
         Args:
             name: Dataset name - one of:
-                - 'tahoe_pseudobulk_permissive' (padj < 0.10, 115M rows, 4.2 GB)
-                - 'tahoe_pseudobulk_significant' (padj < 0.05, 86M rows, 3.2 GB)
-                - 'tahoe_pseudobulk_high_quality' (padj < 0.05, |FC| > 0.5, 54M rows, 2.0 GB)
+                - 'tahoe_pseudobulk_permissive' (padj < 0.10)
+                - 'tahoe_pseudobulk_significant' (padj < 0.05)
+                - 'tahoe_pseudobulk_high_quality' (padj < 0.05, abs(log2FoldChange) > 0.5)
 
         Returns:
             PyArrow Dataset (lazy - queries are executed on demand)
@@ -352,7 +291,7 @@ class OpenTargetsDataLoader:
         if not path.exists():
             raise FileNotFoundError(
                 f"Tahoe dataset not found at {path}. "
-                f"Run post-processing scripts to create filtered datasets."
+                f"Prepare the filtered files with tools/prepare_tahoe.py (see docs/TAHOE_SETUP.md)."
             )
 
         return ds.dataset(str(path), format='parquet', exclude_invalid_files=True)

@@ -32,6 +32,7 @@ import zipfile
 
 import gradio as gr
 from dotenv import load_dotenv
+from src.config.models import MODEL_CHOICES, resolve_model
 
 # Use this checkout's configuration even when launched from another directory.
 # Exported environment variables take precedence over .env values.
@@ -548,19 +549,12 @@ class CSOSession:
     """Manages a single CSO orchestrator session for one user"""
 
     # Model choices available to users
-    MODEL_CHOICES = {
-        "Sonnet 4.5 (default)": "claude-sonnet-4-5-20250929",
-        "Sonnet 4.6": "claude-sonnet-4-6",
-        "Haiku 4.5 (fast)": "claude-haiku-4-5-20251001",
-        "Opus 4.6": "claude-opus-4-6",
-        "Opus 4.7": "claude-opus-4-7",
-        "Opus 4.8": "claude-opus-4-8",
-    }
+    MODEL_CHOICES = MODEL_CHOICES
 
     def __init__(self, session_id: str, model_key: str = "Sonnet 4.5 (default)"):
         self.session_id = session_id
         self.model_key = model_key
-        self.model_id = self.MODEL_CHOICES.get(model_key, "claude-sonnet-4-5-20250929")
+        self.model_id = resolve_model(model_key)
         self.client = None
         self.activity_tracker = ActivityTracker()
         self.is_initialized = False
@@ -2699,6 +2693,12 @@ def create_interface(authenticated_by_server: bool = False):
 
 def main(share: bool = False):
     """Main entry point"""
+    try:
+        server_port = int(os.environ.get("GRADIO_SERVER_PORT", SERVER_PORT))
+        if not 1 <= server_port <= 65535:
+            raise ValueError()
+    except ValueError:
+        raise SystemExit("GRADIO_SERVER_PORT must be an integer between 1 and 65535.")
     if not APP_PASSWORD:
         raise SystemExit(
             "BIOTECH_APP_PASSWORD is not set. Configure an access password in "
@@ -2709,7 +2709,7 @@ def main(share: bool = False):
     print("VIRTUAL BIOTECH INSTITUTE - WEB INTERFACE")
     print("=" * 70)
     print()
-    print(f"Starting server on http://{server_host}:{SERVER_PORT}")
+    print(f"Starting server on http://{server_host}:{server_port}")
     print()
     print("For external access via Cloudflare Tunnel:")
     print("  cloudflared tunnel run <tunnel-name>")
@@ -2730,7 +2730,7 @@ def main(share: bool = False):
 
     demo.launch(
         server_name=server_host,
-        server_port=SERVER_PORT,
+        server_port=server_port,
         share=share,
         auth=authenticate,
         auth_message="Enter any username and the configured access password.",
