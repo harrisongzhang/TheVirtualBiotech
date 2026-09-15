@@ -8,12 +8,27 @@ A multi-agent AI system for pharmaceutical target identification and due diligen
 
 ### 1. Create the conda environment
 
+Install Conda first and run these commands from the repository root:
+
 ```bash
 conda env create -f environment.yml
 conda activate vbt
 ```
 
 The environment includes all dependencies for the CLI, MCP servers, and analysis scripts (Python 3.11, scanpy, anndata, CELLxGENE Census, R integration, etc.).
+
+Activate `vbt` in each new shell before running Python. Activation also makes
+the environment's R installation available to `rpy2`. For an existing `vbt`
+environment, apply dependency changes with
+`conda env update --name vbt --file environment.yml`.
+
+The explicit `libopenblas` dependency supplies `libopenblas.so.0`, which the
+Linux `rpy2` extension needs even when Conda selects MKL for other BLAS packages.
+Check the R integration after installation:
+
+```bash
+python -c "from rpy2.robjects import r; print(r('R.version.string')[0]); r('library(lme4); library(lmerTest)')"
+```
 
 > **Live runs need the Claude Code CLI, which the pinned SDK provides.** The
 > `claude-agent-sdk` wheels bundle the CLI binary the SDK drives, and it is used
@@ -41,6 +56,22 @@ Download the [Open Targets Platform 25.09 data release](https://ftp.ebi.ac.uk/pu
 └── ...
 ```
 
+The included downloader retrieves the archived layout automatically:
+
+```bash
+python tools/download_open_targets.py /path/to/open_targets --workers 8
+```
+
+The complete release contains 3,508 Parquet files in 38 datasets and occupies
+approximately 29 GiB. Allow additional disk space for the Conda environment
+and research outputs. Rerun the same command after an interrupted download;
+it resumes partial transfers and verifies completed files against the local
+size/SHA-256 manifest. Downloads are checked for complete transfers and Parquet
+header/footer markers. Use `--list-only` to inspect the archive inventory
+without downloading it. No API key is needed for downloading or local data
+checks. Loading large datasets into memory can require substantially more RAM
+than their compressed file size.
+
 **Tahoe-100M drug perturbation data (optional — enables the Tahoe functional-genomics tools)**
 
 The functional genomics MCP server's drug-perturbation tools use Tahoe-100M pseudobulk differential expression results. These are **not distributed with this repository** — obtain your own copy of the DE results from the [Tahoe-100M dataset](https://www.biorxiv.org/content/10.1101/2024.04.09.588750) and point `TAHOE_DATA_PATH` at them. Without `TAHOE_DATA_PATH` set, the DepMap essentiality tools still work; only the Tahoe drug-perturbation tools are inactive. The loader expects the following layout under `TAHOE_DATA_PATH`:
@@ -59,7 +90,7 @@ tahoe/data/
 
 ### 3. Set environment variables
 
-Environment variables can be set in a `.env` file in the project root (loaded automatically via `python-dotenv`) or exported in your shell.
+Environment variables can be set in a `.env` file in the project root (loaded automatically via `python-dotenv`) or exported in your shell. Quoted values are supported; exported variables take precedence over `.env` values. Keep `.env` private; it is excluded from Git.
 
 **Two kinds of paths — don't confuse them:**
 
@@ -82,13 +113,34 @@ TAHOE_DATA_PATH="/path/to/tahoe/data"            # optional; enables the Tahoe f
 MCP_OUTPUT_DIR="/path/to/data"       # MCP server file outputs (parquet query results)
 ```
 
-**Optional — web app access password** (only used by the Gradio web UI):
+**Required for the Gradio web UI** (not needed by the CLI):
 ```bash
-BIOTECH_APP_PASSWORD="choose-your-own"   # overrides the built-in default login password
+BIOTECH_APP_PASSWORD="choose-your-own"
 ```
-The Gradio app (`gradio_cso_app.py`) is gated by a simple access password. It ships
-with a weak built-in default and is intended to bind to localhost; set
-`BIOTECH_APP_PASSWORD` to your own value before exposing it beyond your machine.
+The Gradio app requires an explicitly configured access password. Gradio
+verifies it before serving the interface or accepting research submissions.
+Enter any username and the configured password on the login form. This is a
+single shared password for the local app.
+
+### 4. Configure the MCP servers and check setup
+
+```bash
+python setup_mcp.py
+```
+
+This generates `mcp_config.json` for the active interpreter and checkout. It is
+machine-specific and excluded from Git; regenerate it after moving the checkout,
+changing environments or switching to Apptainer. The setup reports 12 servers.
+
+On systems with Bash, `bash run.sh doctor` checks the environment, model key and
+MCP configuration. For a different Conda installation or environment name,
+use the documented `activate.local.sh` override in `activate.sh`.
+
+The application regression tests can be run without model requests:
+
+```bash
+python -m unittest discover -s tests
+```
 
 ---
 
@@ -202,6 +254,23 @@ sessions/
     ├── trace.jsonl           # Fine-grained event log (tool calls, sub-agent I/O)
     └── workspace/            # Files written by agents during the session
 ```
+
+---
+
+## Running Gradio
+
+Set `BIOTECH_APP_PASSWORD` in the project-root `.env`, then run:
+
+```bash
+conda activate vbt
+python setup_mcp.py
+python gradio_cso_app.py
+```
+
+Open `http://127.0.0.1:7860` and sign in with any username and your configured
+password. Research requests require `ANTHROPIC_API_KEY` and the reference-data
+path from setup step 3. On systems with Bash, `bash run.sh web` activates the
+environment, regenerates the MCP configuration and starts the same interface.
 
 ---
 
