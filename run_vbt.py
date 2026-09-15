@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+from src.config.models import DEFAULT_MODEL_ID, MODEL_HELP, model_argument
 
 
 def _app():
@@ -345,8 +346,8 @@ def main() -> int:
     p = sub.add_parser("run", help="run one or more turns headlessly")
     p.add_argument("query", nargs="*", help="user turn(s); repeat for a conversation")
     p.add_argument("-f", "--file", help="file with one turn per line")
-    p.add_argument("-m", "--model", default="Sonnet 4.5 (default)",
-                   help="model label")
+    p.add_argument("-m", "--model", default=DEFAULT_MODEL_ID,
+                   type=model_argument, help=MODEL_HELP)
     p.add_argument("-q", "--quiet", action="store_true")
     p.set_defaults(func=cmd_run)
 

@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import sys
 import threading
 import time
 from urllib.error import HTTPError
@@ -25,6 +26,61 @@ from urllib.request import Request, urlopen
 BASE = "https://ftp.ebi.ac.uk/pub/databases/opentargets/platform/25.09/output/"
 RELEASE = "25.09"
 ATTEMPTS = 5
+
+
+class Progress:
+    """Report active transfers even when no file has finished recently."""
+
+    def __init__(self, total_files: int, interval: float = 10):
+        self.total_files = total_files
+        self.interval = interval
+        self.lock = threading.Lock()
+        self.done = threading.Event()
+        self.started = time.monotonic()
+        self.received = 0
+        self.completed = 0
+        self.validated_bytes = 0
+        self.active = {}
+        self.thread = threading.Thread(target=self._report_periodically, daemon=True)
+
+    def start(self, name, offset, total):
+        with self.lock:
+            self.active[name] = [offset, total]
+
+    def advance(self, name, size):
+        with self.lock:
+            self.received += size
+            self.active[name][0] += size
+
+    def finish(self, name):
+        with self.lock:
+            self.active.pop(name, None)
+
+    def complete(self, size):
+        with self.lock:
+            self.completed += 1
+            self.validated_bytes += size
+
+    def report(self):
+        with self.lock:
+            active_bytes = sum(value[0] for value in self.active.values())
+            elapsed = int(time.monotonic() - self.started)
+            message = (
+                f"Progress: validated {self.completed}/{self.total_files} files "
+                f"({self.validated_bytes / 1024**3:.2f} GiB); "
+                f"{len(self.active)} active files ({active_bytes / 1024**2:.1f} MiB so far); "
+                f"received {self.received / 1024**2:.1f} MiB this run; "
+                f"elapsed {elapsed // 60}m {elapsed % 60}s"
+            )
+        print(message, flush=True)
+
+    def _report_periodically(self):
+        while not self.done.wait(self.interval):
+            self.report()
+
+    def close(self):
+        self.done.set()
+        self.thread.join()
 
 
 class DownloadCancelled(Exception):
@@ -164,7 +220,7 @@ def resume_metadata(partial: Path, resume: Path, url: str) -> dict:
 
 
 def download(root: Path, relative: str, url: str, previous: dict | None,
-             stop: threading.Event | None = None) -> dict:
+             stop: threading.Event | None = None, progress: Progress | None = None) -> dict:
     target, partial, resume = download_paths(root, relative)
     previous = previous if metadata_matches(previous, url) else None
     if target.exists() and previous and target.stat().st_size == previous["bytes"]:
@@ -211,6 +267,8 @@ def download(root: Path, relative: str, url: str, previous: dict | None,
                     validator = metadata.get("validator", "")
                 metadata = {"url": url, "validator": validator}
                 transferred = 0
+                if progress is not None:
+                    progress.start(relative, offset, total)
                 with partial.open("ab" if offset else "wb") as output:
                     write_json(resume, metadata)
                     while chunk := response.read(1024 * 1024):
@@ -220,6 +278,8 @@ def download(root: Path, relative: str, url: str, previous: dict | None,
                             raise IntegrityError("HTTP response exceeded its declared length")
                         output.write(chunk)
                         transferred += len(chunk)
+                        if progress is not None:
+                            progress.advance(relative, len(chunk))
                     output.flush()
                     os.fsync(output.fileno())
                 if length is not None and transferred != length:
@@ -251,6 +311,9 @@ def download(root: Path, relative: str, url: str, previous: dict | None,
         except Exception:
             if attempt == ATTEMPTS - 1:
                 raise
+        finally:
+            if progress is not None:
+                progress.finish(relative)
         # Preserve interrupted, incomplete bodies so the next request resumes.
         delay = min(2 ** attempt, 8)
         if stop is not None:
@@ -281,6 +344,7 @@ def main() -> None:
     args = parser.parse_args()
     if not 1 <= args.workers <= 16:
         parser.error("workers must be between 1 and 16")
+    print(f"Discovering Open Targets {RELEASE} archive inventory...", file=sys.stderr, flush=True)
     files = discover()
     print(f"Archive inventory: {len(files)} Parquet files", flush=True)
     if not files:
@@ -308,6 +372,9 @@ def main() -> None:
     pool = ThreadPoolExecutor(max_workers=args.workers)
     futures = {}
     processed = set()
+    progress = Progress(len(files))
+    print(f"Downloading/verifying with {args.workers} workers; progress every {progress.interval:g}s.", flush=True)
+    progress.thread.start()
 
     def remember_success(future):
         nonlocal completed, total_bytes
@@ -316,11 +383,12 @@ def main() -> None:
         entries[futures[future]] = result
         completed += 1
         total_bytes += size
+        progress.complete(size)
         processed.add(future)
 
     try:
         for name, url in files:
-            future = pool.submit(download, root, name, url, entries.get(name), stop)
+            future = pool.submit(download, root, name, url, entries.get(name), stop, progress)
             futures[future] = name
         for future in as_completed(futures):
             name = futures[future]
@@ -343,6 +411,7 @@ def main() -> None:
     finally:
         stop.set()
         pool.shutdown(wait=True, cancel_futures=True)
+        progress.close()
         # Validation/rename may finish after cancellation. Preserve those
         # results without counting futures already handled by as_completed.
         for future, name in futures.items():

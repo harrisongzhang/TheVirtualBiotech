@@ -119,13 +119,30 @@ class TestShellStartup(unittest.TestCase):
         self.caller.mkdir()
         for name in ("run.sh", "run_vbt.py"):
             shutil.copy2(REPO / name, self.repo / name)
+        (self.repo / "tools").mkdir()
+        for name in ("doctor.py", "download_open_targets.py"):
+            shutil.copy2(REPO / "tools" / name, self.repo / "tools" / name)
+        (self.repo / "src/config").mkdir(parents=True)
+        (self.repo / "src/__init__.py").touch()
+        (self.repo / "src/config/__init__.py").touch()
+        for name in ("models.py", "datasets.py"):
+            shutil.copy2(REPO / "src/config" / name, self.repo / "src/config" / name)
         (self.repo / "activate.local.sh").write_text(
             f"export PATH={shlex.quote(str(Path(sys.executable).parent))}:\"$PATH\"\n"
         )
         (self.repo / "setup_mcp.py").write_text("")
-        (self.repo / "mcp_config.json").write_text('{"mcpServers":{"provenance":{}}}')
+        from tools.doctor import MCP_SERVERS
+        from src.config.datasets import OPEN_TARGETS_DATASETS
+        (self.repo / "mcp_config.json").write_text(json.dumps({"mcpServers": {
+            name: {"command": sys.executable, "args": [str(self.repo / "setup_mcp.py")]}
+            for name in MCP_SERVERS
+        }}))
+        for name in OPEN_TARGETS_DATASETS:
+            dataset = self.repo / "reference" / name
+            dataset.mkdir(parents=True)
+            (dataset / "part.parquet").write_bytes(b"PAR1test\x04\x00\x00\x00PAR1")
         # Keep these checks focused on the wrapper's environment diagnostics.
-        for name in ("gradio", "claude_agent_sdk", "fastmcp", "pandas"):
+        for name in ("gradio", "claude_agent_sdk", "fastmcp", "pandas", "pyarrow"):
             (self.repo / f"{name}.py").write_text("")
         (self.repo / "gradio_cso_app.py").write_text(
             "import json, os\n"
@@ -141,6 +158,7 @@ class TestShellStartup(unittest.TestCase):
             if k not in ("ANTHROPIC_API_KEY", "BIOTECH_APP_PASSWORD", "PYTHONPATH")
         }
         self.env.update(VBT_RUNS_DIR=str(self.repo / "runs"),
+                        OPEN_TARGETS_DATA_PATH=str(self.repo / "reference"),
                         CLAUDE_CONFIG_DIR=str(self.repo / "config"))
 
     def run_shell(self, *args):
@@ -188,6 +206,26 @@ class TestShellStartup(unittest.TestCase):
         result = self.run_shell("doctor")
         self.assertEqual(result.returncode, 1)
         self.assertIn("[FAIL] no non-empty ANTHROPIC_API_KEY", result.stdout)
+
+    def test_doctor_rejects_nonexistent_reference_even_with_a_key(self):
+        self.env.update(ANTHROPIC_API_KEY="test-key", OPEN_TARGETS_DATA_PATH=str(self.repo / "absent"))
+        result = self.run_shell("doctor")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("OPEN_TARGETS_DATA_PATH is not a directory", result.stdout)
+        self.assertNotIn("PASS", result.stdout)
+
+    def test_doctor_can_check_local_setup_without_model_credentials(self):
+        result = self.run_shell("doctor", "--skip-api-key")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[skip] ANTHROPIC_API_KEY", result.stdout)
+        self.assertIn("Model authentication and research execution were not tested", result.stdout)
+
+    def test_doctor_does_not_report_pass_after_activation_fails(self):
+        (self.repo / "activate.local.sh").write_text("return 1\n")
+        result = self.run_shell("doctor", "--skip-api-key")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("activate.sh did not complete", result.stdout)
+        self.assertNotIn("PASS", result.stdout)
 
 
 @unittest.skipUnless(HAS_APP, "requires the application environment")
@@ -323,6 +361,41 @@ class TestApplicationStartup(unittest.TestCase):
                     self.addCleanup(blocks.close, verbose=False)
                     self.assertEqual(blocks._queue.default_concurrency_limit, concurrency)
                     self.assertEqual(blocks._queue.max_size, max_size)
+
+    def test_web_port_override_reaches_gradio_and_keeps_local_binding(self):
+        demo = Mock()
+        with patch.dict(os.environ, {"GRADIO_SERVER_PORT": "17860"}), \
+                patch.object(self.app, "APP_PASSWORD", "test-password"), \
+                patch.object(self.app, "create_interface", return_value=(demo, "", "", None)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.app.main()
+        self.assertEqual(demo.launch.call_args.kwargs["server_port"], 17860)
+        self.assertEqual(demo.launch.call_args.kwargs["server_name"], "127.0.0.1")
+
+    def test_invalid_web_ports_fail_before_creating_interface(self):
+        for value in ("0", "65536", "abc", ""):
+            with self.subTest(value=value), patch.dict(os.environ, {"GRADIO_SERVER_PORT": value}), \
+                    patch.object(self.app, "create_interface") as create:
+                with self.assertRaisesRegex(SystemExit, "GRADIO_SERVER_PORT"):
+                    self.app.main()
+                create.assert_not_called()
+
+    def test_headless_sessions_preserve_model_ids_and_resolve_labels(self):
+        for value in ("claude-opus-4-6", "Opus 4.6"):
+            self.assertEqual(self.app.CSOSession("model-check", value).model_id, "claude-opus-4-6")
+        with self.assertRaisesRegex(ValueError, "Unknown model"):
+            self.app.CSOSession("model-check", "typo-model")
+
+    def test_invalid_model_labels_fail_before_credentials_in_both_clis(self):
+        for entry in (["run.py"], ["run_vbt.py", "run", "test question"]):
+            with self.subTest(entry=entry):
+                result = subprocess.run(
+                    [sys.executable, *entry, "--model", "typo-model"], cwd=REPO,
+                    env=dict(os.environ, ANTHROPIC_API_KEY=""), capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("Unknown model", result.stderr)
+                self.assertNotIn("ANTHROPIC_API_KEY", result.stderr)
 
     def test_research_sessions_reject_missing_key_before_sdk_setup(self):
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}), tempfile.TemporaryDirectory() as tmp:
