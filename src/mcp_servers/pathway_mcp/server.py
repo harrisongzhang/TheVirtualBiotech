@@ -27,6 +27,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from fastmcp import FastMCP
+from src.mcp_servers.registration import register_tool
 from src.mcp_servers.pathway_mcp.tools import (
     get_gene_pathways,
     search_pathways,
@@ -44,16 +45,16 @@ from src.mcp_servers.pathway_mcp.tools import (
 mcp = FastMCP("Pathway MCP")
 
 # Register tools
-mcp.tool()(get_gene_pathways)
-mcp.tool()(search_pathways)
-mcp.tool()(get_gene_ontology)
-mcp.tool()(search_go_terms)
-mcp.tool()(find_genes_in_pathway)
-mcp.tool()(get_pathway_enrichment)
-mcp.tool()(get_go_enrichment)           # NEW: GO enrichment analysis
-mcp.tool()(get_go_term_info)
-mcp.tool()(get_pathway_info)
-mcp.tool()(get_sequence_ontology_term)
+register_tool(mcp, get_gene_pathways)
+register_tool(mcp, search_pathways)
+register_tool(mcp, get_gene_ontology)
+register_tool(mcp, search_go_terms)
+register_tool(mcp, find_genes_in_pathway)
+register_tool(mcp, get_pathway_enrichment)
+register_tool(mcp, get_go_enrichment)           # NEW: GO enrichment analysis
+register_tool(mcp, get_go_term_info)
+register_tool(mcp, get_pathway_info)
+register_tool(mcp, get_sequence_ontology_term)
 
 if __name__ == "__main__":
     # Run server

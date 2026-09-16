@@ -23,6 +23,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from fastmcp import FastMCP
+from src.mcp_servers.registration import register_tool
 from src.mcp_servers.disease_mcp.tools import (
     get_disease_info,
     search_diseases_by_name,
@@ -36,12 +37,12 @@ from src.mcp_servers.disease_mcp.tools import (
 mcp = FastMCP("Disease MCP")
 
 # Register tools
-mcp.tool()(get_disease_info)
-mcp.tool()(search_diseases_by_name)
-mcp.tool()(get_disease_hierarchy)
-mcp.tool()(get_disease_phenotypes)
-mcp.tool()(find_diseases_by_therapeutic_area)
-mcp.tool()(find_diseases_by_phenotype)          # NEW: Reverse phenotype search
+register_tool(mcp, get_disease_info)
+register_tool(mcp, search_diseases_by_name)
+register_tool(mcp, get_disease_hierarchy)
+register_tool(mcp, get_disease_phenotypes)
+register_tool(mcp, find_diseases_by_therapeutic_area)
+register_tool(mcp, find_diseases_by_phenotype)          # NEW: Reverse phenotype search
 
 if __name__ == "__main__":
     # Run server

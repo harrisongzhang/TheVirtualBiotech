@@ -31,6 +31,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from fastmcp import FastMCP
+from src.mcp_servers.registration import register_tool
 from src.mcp_servers.clinicaltrials_mcp.tools import (
     # ClinicalTrials.gov tools
     get_clinical_trial_details,
@@ -48,16 +49,16 @@ from src.mcp_servers.clinicaltrials_mcp.tools import (
 mcp = FastMCP("Clinical Data MCP")
 
 # Register ClinicalTrials.gov tools
-mcp.tool()(get_clinical_trial_details)
-mcp.tool()(clear_trial_cache)
-mcp.tool()(search_clinical_trials)
-mcp.tool()(count_clinical_trials)
+register_tool(mcp, get_clinical_trial_details)
+register_tool(mcp, clear_trial_cache)
+register_tool(mcp, search_clinical_trials)
+register_tool(mcp, count_clinical_trials)
 
 # Register cBioPortal tools
-mcp.tool()(get_all_cancer_types)
-mcp.tool()(search_studies)
-mcp.tool()(get_study_details)
-mcp.tool()(get_clinical_data)
+register_tool(mcp, get_all_cancer_types)
+register_tool(mcp, search_studies)
+register_tool(mcp, get_study_details)
+register_tool(mcp, get_clinical_data)
 
 if __name__ == "__main__":
     # Run server

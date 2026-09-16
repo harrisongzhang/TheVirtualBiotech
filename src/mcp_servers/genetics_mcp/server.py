@@ -25,6 +25,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from fastmcp import FastMCP
+from src.mcp_servers.registration import register_tool
 from src.mcp_servers.genetics_mcp.tools import (
     query_gwas_associations,
     query_l2g_predictions,
@@ -42,16 +43,16 @@ from src.mcp_servers.genetics_mcp.tools import (
 mcp = FastMCP("Genetics MCP")
 
 # Register tools
-mcp.tool()(query_gwas_associations)
-mcp.tool()(query_l2g_predictions)
-mcp.tool()(get_credible_sets)
-mcp.tool()(get_qtl_colocalization)
-mcp.tool()(convert_rsid_to_variant_id)
-mcp.tool()(get_variant_annotation)
-mcp.tool()(get_study_metadata)
-mcp.tool()(query_regulatory_regions)
-mcp.tool()(query_colocalisation)
-mcp.tool()(get_colocalisation_by_chromosome)
+register_tool(mcp, query_gwas_associations)
+register_tool(mcp, query_l2g_predictions)
+register_tool(mcp, get_credible_sets)
+register_tool(mcp, get_qtl_colocalization)
+register_tool(mcp, convert_rsid_to_variant_id)
+register_tool(mcp, get_variant_annotation)
+register_tool(mcp, get_study_metadata)
+register_tool(mcp, query_regulatory_regions)
+register_tool(mcp, query_colocalisation)
+register_tool(mcp, get_colocalisation_by_chromosome)
 
 if __name__ == "__main__":
     # Run server

@@ -210,6 +210,7 @@ def audit_session(session: Path, out_dir: Path, in_place: bool = False,
         r = validate_claims(raw, m, prov, strict=False)
         claim_set = ClaimSet(r.claims)
         claim_set.link_into_manifest(m)
+    claim_set.write(run_dir / "evidence" / "claims.json")
 
     # ── Record execution order and close out ─────────────────────────
     m.record_execution([
@@ -254,8 +255,9 @@ def audit_session(session: Path, out_dir: Path, in_place: bool = False,
             f"new layout record attribution as they execute."
         )
     if not claim_set.claims:
-        notes.append("This session recorded no claim-evidence objects — that mechanism "
-                     "did not exist when it ran. New runs record them automatically.")
+        notes.append("This session has no recorded claim-evidence objects. "
+                     "Reconstructing artifacts and tool activity cannot recover claims "
+                     "that were never filed, or establish support for the final answer.")
 
     (run_dir / "README.md").write_text(render_readme(m, prov, claim_set, notes))
     (run_dir / "audit.html").write_text(render_audit_html(m, prov, claim_set, notes))

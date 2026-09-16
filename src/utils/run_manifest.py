@@ -53,6 +53,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from src.utils.run_storage import write_json_atomic
+
 MANIFEST_VERSION = 1
 
 #: Per-agent sub-layout. Inherited from the retired WorkspaceManager so existing
@@ -78,6 +80,10 @@ _NON_ARTIFACT_NAMES = {
     "audit.html",
     "replay_diff.json",
     "environment_full.yml",
+    "environment.yml",
+    "session_report.json",
+    "trace.jsonl",
+    "transcript.md",
 }
 
 #: Top-level directories the harness itself owns. Their contents describe the
@@ -249,6 +255,7 @@ class RunManifest:
             or produced_at
             or datetime.fromtimestamp(p.stat().st_mtime).isoformat(),
             "modified_at": datetime.fromtimestamp(p.stat().st_mtime).isoformat(),
+            "mtime_ns": p.stat().st_mtime_ns,
             "tool_use_id": tool_use_id or prev.get("tool_use_id"),
             "created_by": created_by or prev.get("created_by"),
             "description": description or prev.get("description"),
@@ -266,6 +273,7 @@ class RunManifest:
         produced_by: str = CSO_DIR,
         skip_known: bool = True,
         attribute_by_dir: bool = True,
+        refresh_changed: bool = False,
     ) -> list[dict[str, Any]]:
         """Register every file under *root* not already in the manifest.
 
@@ -277,7 +285,8 @@ class RunManifest:
         root = Path(root) if root else self.run_dir
         added = []
         for p in sorted(root.rglob("*")):
-            if not p.is_file() or _is_ignored(p):
+            if (not p.is_file() or _is_ignored(p, self.run_dir)
+                    or not p.resolve().is_relative_to(self.run_dir.resolve())):
                 continue
             key = self.rel(p)
             if _in_reserved_dir(key):
@@ -289,13 +298,20 @@ class RunManifest:
                     if key not in misplaced:
                         misplaced.append(key)
                 continue
-            if skip_known and key in self.data["artifacts"]:
-                continue
+            previous = self.data["artifacts"].get(key)
+            if skip_known and previous:
+                stat = p.stat()
+                unchanged = (previous.get("bytes") == stat.st_size and
+                             previous.get("mtime_ns") == stat.st_mtime_ns)
+                if not refresh_changed or unchanged:
+                    continue
             agent = produced_by
             if attribute_by_dir:
                 parts = Path(key).parts
                 if len(parts) >= 2 and parts[0] == "work":
                     agent = parts[1]
+            if previous:
+                agent = previous.get("produced_by") or agent
             e = self.add_artifact(p, produced_by=agent)
             if e:
                 added.append(e)
@@ -351,12 +367,7 @@ class RunManifest:
     # ── Serialisation ────────────────────────────────────────────────
 
     def write(self) -> Path:
-        path = self.run_dir / "MANIFEST.json"
-        tmp = path.with_suffix(".json.tmp")
-        with open(tmp, "w") as f:
-            json.dump(self.data, f, indent=2, default=str)
-        os.replace(tmp, path)   # atomic: a crash mid-write can't truncate the spine
-        return path
+        return write_json_atomic(self.run_dir / "MANIFEST.json", self.data)
 
     def summary(self) -> dict[str, Any]:
         by_kind: dict[str, int] = {}
@@ -388,12 +399,13 @@ def _in_reserved_dir(rel_path: str) -> bool:
     return bool(parts) and parts[0] in RESERVED_DIRS
 
 
-def _is_ignored(path: Path) -> bool:
-    if any(part in _IGNORE_DIRS for part in path.parts):
+def _is_ignored(path: Path, run_dir: Path) -> bool:
+    # Ignore hidden/runtime files recursively, but harness filenames only at
+    # the run root. A specialist's results/reports/README.md is real output.
+    relative = path.relative_to(run_dir)
+    if any(part in _IGNORE_DIRS or part.startswith(".") for part in relative.parts):
         return True
-    if path.name in _NON_ARTIFACT_NAMES:
-        return True
-    return path.name.startswith(".")
+    return len(relative.parts) == 1 and path.name in _NON_ARTIFACT_NAMES
 
 
 def snapshot_dir(root: Path) -> dict[str, tuple[float, int]]:
@@ -408,7 +420,8 @@ def snapshot_dir(root: Path) -> dict[str, tuple[float, int]]:
         return out
     for p in root.rglob("*"):
         try:
-            if not p.is_file() or _is_ignored(p):
+            if (not p.is_file() or _is_ignored(p, root)
+                    or not p.resolve().is_relative_to(root.resolve())):
                 continue
             rel = str(p.relative_to(root))
             if _in_reserved_dir(rel):

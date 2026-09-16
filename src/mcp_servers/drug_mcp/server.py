@@ -26,6 +26,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from fastmcp import FastMCP
+from src.mcp_servers.registration import register_tool
 from src.mcp_servers.drug_mcp.tools import (
     search_drugs,
     get_drug_info,
@@ -42,15 +43,15 @@ from src.mcp_servers.drug_mcp.tools import (
 mcp = FastMCP("Drug MCP")
 
 # Register tools
-mcp.tool()(search_drugs)
-mcp.tool()(get_drug_info)
-mcp.tool()(get_target_tractability)
-mcp.tool()(get_drug_indications)
-mcp.tool()(get_drug_warnings)
-mcp.tool()(get_drug_adverse_events)
-mcp.tool()(get_drug_mechanisms)
-mcp.tool()(search_known_drugs)
-mcp.tool()(get_pharmacogenomics)
+register_tool(mcp, search_drugs)
+register_tool(mcp, get_drug_info)
+register_tool(mcp, get_target_tractability)
+register_tool(mcp, get_drug_indications)
+register_tool(mcp, get_drug_warnings)
+register_tool(mcp, get_drug_adverse_events)
+register_tool(mcp, get_drug_mechanisms)
+register_tool(mcp, search_known_drugs)
+register_tool(mcp, get_pharmacogenomics)
 
 if __name__ == "__main__":
     # Run server

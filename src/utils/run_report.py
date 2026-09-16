@@ -36,6 +36,7 @@ from typing import Any, Optional
 from src.utils.claims import EVIDENCE_STATUS_LABELS, evidence_status
 from src.utils.plan_runner import reconcile, render_plan_md
 from src.utils.run_manifest import CSO_DIR
+from src.utils.verify import assess_evidence_coverage
 
 # ── Palette (validated; see dataviz references/palette.md) ───────────
 
@@ -117,6 +118,7 @@ def render_readme(manifest, provenance=None, claim_set=None,
     d = manifest.data
     s = manifest.summary()
     by_agent, order = _collect(manifest, provenance, claim_set)
+    coverage = assess_evidence_coverage(manifest, claim_set, provenance)
     L: list[str] = []
 
     L.append(f"# Run `{d['run_id']}`")
@@ -141,10 +143,20 @@ def render_readme(manifest, provenance=None, claim_set=None,
                  f"{ps['n_cso_tool_calls']} by the CSO) |")
         if ps["n_tool_errors"]:
             L.append(f"| **Tool errors** | {ps['n_tool_errors']} |")
-    if claim_set is not None and claim_set.claims:
-        cs = claim_set.stats()
-        L.append(f"| **Claims** | {cs['n_claims']} "
-                 f"({cs['n_verified_evidence']}/{cs['n_evidence']} evidence links verified) |")
+    L.append(f"| **Claims** | {coverage['total']} |")
+    L.append(f"| **Evidence coverage** | {coverage['status'].replace('_', ' ')} |")
+    L.append("")
+
+    if coverage["problems"]:
+        L.append("> **Evidence audit incomplete.** File hashes alone do not establish "
+                 "that the report's conclusions have recorded support.")
+        L.append("")
+        for problem in coverage["problems"]:
+            L.append(f"- {problem['detail']}")
+        L.append("")
+    L.append("Evidence coverage checks recorded pointers and report references; "
+             "it does not verify scientific correctness or external citations. "
+             "Use `verify` below to also check artifact hashes.")
     L.append("")
 
     if notes:
@@ -244,20 +256,22 @@ def render_readme(manifest, provenance=None, claim_set=None,
             L.append("")
         bad = claim_set.stats()["claims_without_verified_evidence"]
         if bad:
-            L.append(f"> **{len(bad)} claim(s) have no independently verified evidence:** "
-                     f"{', '.join(bad)}")
+            L.append(f"> **{len(bad)} claim(s) have no locally verified evidence links:** "
+                     f"{', '.join(bad)}. External references require source review.")
             L.append("")
 
     # ── 4. Reproducing this run ──────────────────────────────────
     L.append("## Reproducing this run")
     L.append("")
     L.append("```bash")
-    L.append(f"./run.sh verify {d['run_id']}   # re-run the analysis code, check every hash")
+    L.append(f"./run.sh verify {d['run_id']}   # check file hashes and evidence coverage")
+    L.append(f"./run.sh verify {d['run_id']} --rerun   # also re-execute analysis scripts")
     L.append(f"./run.sh replay {d['run_id']}   # re-run the same turns into a new run dir")
     L.append("```")
     L.append("")
-    L.append("`verify` is exact: it re-executes the analysis scripts under `work/*/code/` and "
-             "fails on any byte difference. `replay` re-runs the agents against the same pinned "
+    L.append("`verify` checks recorded files, claims and report references. With `--rerun`, "
+             "it also re-executes the analysis scripts under `work/*/code/` and compares "
+             "the reproduced outputs. `replay` re-runs the agents against the same pinned "
              "models and prompts — LLM sampling means it is comparable, not bit-identical.")
     L.append("")
 
@@ -315,6 +329,7 @@ def render_audit_html(manifest, provenance=None, claim_set=None,
     d = manifest.data
     s = manifest.summary()
     by_agent, order = _collect(manifest, provenance, claim_set)
+    coverage = assess_evidence_coverage(manifest, claim_set, provenance)
     colors = _agent_colors([a for a in order if a != CSO_DIR])
     colors[CSO_DIR] = ("#898781", "#898781")
 
@@ -332,10 +347,9 @@ def render_audit_html(manifest, provenance=None, claim_set=None,
         tiles.append(("Tool calls", str(ps["n_tool_calls"]),
                       f"{ps['n_attributed_to_specialist']} by specialists"))
         if ps.get("n_tool_errors"):
-            tiles.append(("Tool errors", str(ps["n_tool_errors"]), "recovered in-run"))
-    if cs:
-        tiles.append(("Claims", str(cs["n_claims"]),
-                      f"{cs['n_verified_evidence']}/{cs['n_evidence']} links verified"))
+            tiles.append(("Tool errors", str(ps["n_tool_errors"]), "recorded failures"))
+    tiles.append(("Claims", str(coverage["total"]),
+                  "evidence coverage: " + coverage["status"].replace("_", " ")))
     tiles.append(("Duration", dur, ""))
 
     P: list[str] = []
@@ -366,6 +380,17 @@ def render_audit_html(manifest, provenance=None, claim_set=None,
                  f'<div class="tile-v">{html.escape(value)}</div>'
                  f'<div class="tile-s">{html.escape(sub)}</div></div>')
     P.append("</div>")
+
+    if coverage["problems"]:
+        P.append('<div class="note warnbox"><strong>Evidence audit incomplete.</strong> '
+                 'File hashes alone do not establish that the report\'s conclusions '
+                 'have recorded support.<ul>')
+        for problem in coverage["problems"]:
+            P.append(f"<li>{html.escape(problem['detail'])}</li>")
+        P.append("</ul></div>")
+    P.append('<p class="lede">Evidence coverage checks recorded pointers and report '
+             'references; it does not verify scientific correctness or external '
+             'citations. Use <code>verify</code> below to also check artifact hashes.</p>')
 
     if notes:
         P.append('<div class="note"><strong>About this report.</strong><ul>')
@@ -490,8 +515,8 @@ def render_audit_html(manifest, provenance=None, claim_set=None,
         bad = cs.get("claims_without_verified_evidence") or []
         if bad:
             P.append(f'<div class="note warnbox"><strong>{len(bad)} claim(s) carry no '
-                     f'independently verified evidence:</strong> {html.escape(", ".join(bad))}. '
-                     f'Treat these as unsupported until the underlying artifact is located.</div>')
+                     f'locally verified evidence links:</strong> {html.escape(", ".join(bad))}. '
+                     'External references require source review.</div>')
         P.append("</section>")
 
     # 4. Provenance table
@@ -505,11 +530,14 @@ def render_audit_html(manifest, provenance=None, claim_set=None,
     # 5. Reproducing
     P.append(sec("Reproducing this run"))
     P.append(f'<pre class="cmd">./run.sh verify {html.escape(d["run_id"])}'
-             '   <span class="dim"># re-run the analysis code, check every hash</span>\n'
+             '   <span class="dim"># check file hashes and evidence coverage</span>\n'
+             f'./run.sh verify {html.escape(d["run_id"])} --rerun'
+             '   <span class="dim"># also re-execute analysis scripts</span>\n'
              f'./run.sh replay {html.escape(d["run_id"])}'
              '   <span class="dim"># re-run the same turns into a new run dir</span></pre>')
-    P.append('<p class="lede"><code>verify</code> is exact — it re-executes the analysis scripts '
-             'under <code>work/*/code/</code> and fails on any byte difference. '
+    P.append('<p class="lede"><code>verify</code> checks recorded files, claims and report '
+             'references. With <code>--rerun</code>, it also re-executes analysis scripts '
+             'under <code>work/*/code/</code> and compares the reproduced outputs. '
              '<code>replay</code> re-runs the agents against the same pinned models and prompts; '
              'because LLM sampling is stochastic the result is comparable, not bit-identical. '
              'We state the difference rather than implying end-to-end determinism.</p>')

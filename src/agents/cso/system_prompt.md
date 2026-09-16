@@ -589,6 +589,14 @@ assertions.
    ```
 
 **Rules:**
+- Check tool failures and specialist limitations before synthesizing findings.
+  A failed data query supplies no evidence; it does not establish absence or
+  a count of zero. Name unavailable sources and explain which conclusions
+  remain unresolved. Attribute any web-based alternative to its actual source,
+  without describing it as a result from a failed database or as comprehensive.
+- Keep claim IDs unique across conversation turns. When revising a prior claim,
+  explicitly refile that claim with the current evidence. An overwritten file
+  does not automatically validate a claim filed against its earlier contents.
 - Every claim needs at least one piece of evidence. If a specialist asserted
   something with nothing to point at, say so in prose as an unsupported statement
   rather than inventing a citation for it.

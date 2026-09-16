@@ -27,6 +27,8 @@ Tools:
 import json
 import os
 import sys
+from functools import wraps
+from inspect import signature
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -37,6 +39,7 @@ from src.utils.claims import ClaimSet, validate_claims       # noqa: E402
 from src.utils.plan_runner import validate_plan              # noqa: E402
 from src.utils.provenance import build_provenance            # noqa: E402
 from src.utils.run_manifest import RunManifest               # noqa: E402
+from src.utils.run_storage import run_lock, write_json_atomic  # noqa: E402
 
 
 # ── Run discovery ────────────────────────────────────────────────────
@@ -47,9 +50,12 @@ def _find_run(start: Optional[str] = None) -> Optional[Path]:
     Agents run with cwd inside the run directory, so this resolves without the
     caller having to know — or invent — a run id.
     """
-    p = Path(start or os.environ.get("VBT_RUN_DIR") or os.getcwd()).resolve()
+    bound = os.environ.get("VBT_RUN_DIR")
+    p = Path(start or bound or os.getcwd()).resolve()
     for cand in (p, *p.parents):
         if (cand / "MANIFEST.json").exists():
+            if bound and cand != Path(bound).resolve():
+                return None
             return cand
     return None
 
@@ -75,8 +81,24 @@ def _no_run() -> Dict[str, Any]:
     }
 
 
+def _locked_run(function):
+    """Keep application and MCP updates from overwriting one another."""
+    spec = signature(function)
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        arguments = spec.bind(*args, **kwargs)
+        root = _find_run(arguments.arguments.get('run_dir'))
+        if root is None:
+            return _no_run()
+        with run_lock(root):
+            return function(*args, **kwargs)
+    return wrapped
+
+
 # ── Tools ────────────────────────────────────────────────────────────
 
+@_locked_run
 def record_claims(claims: List[Dict[str, Any]], run_dir: Optional[str] = None) -> Dict[str, Any]:
     """Record claim-evidence objects for the current run.
 
@@ -113,6 +135,10 @@ def record_claims(claims: List[Dict[str, Any]], run_dir: Optional[str] = None) -
     if m is None:
         return _no_run()
 
+    # Child processes can write files without a parent PostToolUse event.
+    # Discover those outputs before checking citations, not after the answer.
+    m.scan(refresh_changed=True)
+    m.write()
     result = validate_claims(claims, m, prov, strict=True)
     if not result.ok:
         return {
@@ -144,6 +170,7 @@ def record_claims(claims: List[Dict[str, Any]], run_dir: Optional[str] = None) -
     }
 
 
+@_locked_run
 def register_artifact(path: str, description: str,
                       run_dir: Optional[str] = None) -> Dict[str, Any]:
     """Describe a file you produced, so a human can tell what it is.
@@ -181,7 +208,10 @@ def register_artifact(path: str, description: str,
                 "error": f"No such file: {path}. Write the file before registering it."}
 
     key = m.rel(p)
-    entry = m.data["artifacts"].get(key) or m.add_artifact(p)
+    previous = m.data["artifacts"].get(key, {})
+    parts = Path(key).parts
+    owner = previous.get('produced_by') or (parts[1] if len(parts) > 1 and parts[0] == 'work' else '_cso')
+    entry = m.add_artifact(p, produced_by=owner)
     if entry is None:
         return {"ok": False, "error": f"Could not register {path}."}
     entry["description"] = description[:500]
@@ -192,6 +222,7 @@ def register_artifact(path: str, description: str,
     }}
 
 
+@_locked_run
 def write_plan(steps: List[Dict[str, Any]], goal: str = "",
                run_dir: Optional[str] = None) -> Dict[str, Any]:
     """Record the analysis plan before dispatching specialists.
@@ -229,9 +260,7 @@ def write_plan(steps: List[Dict[str, Any]], goal: str = "",
 
     m.data["plan"] = result.plan
     (m.run_dir / "inputs").mkdir(parents=True, exist_ok=True)
-    (m.run_dir / "inputs" / "plan.json").write_text(
-        json.dumps(result.plan, indent=2, default=str)
-    )
+    write_json_atomic(m.run_dir / "inputs" / "plan.json", result.plan)
     m.write()
     return {
         "ok": True,
@@ -241,6 +270,7 @@ def write_plan(steps: List[Dict[str, Any]], goal: str = "",
     }
 
 
+@_locked_run
 def list_artifacts(agent: Optional[str] = None, kind: Optional[str] = None,
                    run_dir: Optional[str] = None) -> Dict[str, Any]:
     """List what this run has produced so far — the citable evidence.
@@ -260,6 +290,8 @@ def list_artifacts(agent: Optional[str] = None, kind: Optional[str] = None,
     if m is None:
         return _no_run()
 
+    m.scan(refresh_changed=True)
+    m.write()
     rows = []
     for e in m.data["artifacts"].values():
         if agent and e["produced_by"] != agent:

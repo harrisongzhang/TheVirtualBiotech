@@ -33,6 +33,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from fastmcp import FastMCP
+from src.mcp_servers.registration import register_tool
 from src.mcp_servers.target_mcp.tools import (
     get_target_info,
     search_targets_by_name,
@@ -57,23 +58,23 @@ from src.mcp_servers.target_mcp.tools import (
 mcp = FastMCP("Target MCP")
 
 # Register tools
-mcp.tool()(get_target_info)
-mcp.tool()(search_targets_by_name)
-mcp.tool()(get_target_tractability)
-mcp.tool()(get_target_prioritisation_scores)
-mcp.tool()(prioritize_targets)
-mcp.tool()(get_target_safety_profile)
-mcp.tool()(get_mouse_phenotype)
-mcp.tool()(get_pharmacogenomics)
-mcp.tool()(get_comprehensive_target_profile)
+register_tool(mcp, get_target_info)
+register_tool(mcp, search_targets_by_name)
+register_tool(mcp, get_target_tractability)
+register_tool(mcp, get_target_prioritisation_scores)
+register_tool(mcp, prioritize_targets)
+register_tool(mcp, get_target_safety_profile)
+register_tool(mcp, get_mouse_phenotype)
+register_tool(mcp, get_pharmacogenomics)
+register_tool(mcp, get_comprehensive_target_profile)
 # Phase 1: Additional target characterization tools
-mcp.tool()(get_target_hallmarks)
-mcp.tool()(get_target_tep)
-mcp.tool()(get_chemical_probes)
-mcp.tool()(get_genetic_constraint)
-mcp.tool()(get_subcellular_locations)
-mcp.tool()(get_target_class)
-mcp.tool()(get_homologues)
+register_tool(mcp, get_target_hallmarks)
+register_tool(mcp, get_target_tep)
+register_tool(mcp, get_chemical_probes)
+register_tool(mcp, get_genetic_constraint)
+register_tool(mcp, get_subcellular_locations)
+register_tool(mcp, get_target_class)
+register_tool(mcp, get_homologues)
 
 if __name__ == "__main__":
     # Run server

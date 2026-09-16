@@ -23,6 +23,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from fastmcp import FastMCP
+from src.mcp_servers.registration import register_tool
 from src.mcp_servers.expression_mcp.tools import (
     list_available_tissues,
     query_expression_by_gene,
@@ -36,12 +37,12 @@ from src.mcp_servers.expression_mcp.tools import (
 mcp = FastMCP("Expression MCP")
 
 # Register tools
-mcp.tool()(list_available_tissues)
-mcp.tool()(query_expression_by_gene)
-mcp.tool()(query_expression_by_tissue)
-mcp.tool()(compare_expression_across_tissues)
-mcp.tool()(find_tissue_specific_genes)
-mcp.tool()(search_biosample_ontology)
+register_tool(mcp, list_available_tissues)
+register_tool(mcp, query_expression_by_gene)
+register_tool(mcp, query_expression_by_tissue)
+register_tool(mcp, compare_expression_across_tissues)
+register_tool(mcp, find_tissue_specific_genes)
+register_tool(mcp, search_biosample_ontology)
 
 if __name__ == "__main__":
     # Run server (banner disabled for faster startup with multiple servers)
