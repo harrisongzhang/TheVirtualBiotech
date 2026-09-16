@@ -1,6 +1,11 @@
 # The Virtual Biotech
 
-To run demo queries directly on our web interface, visit [virtualbiotech.ai](https://virtualbiotech.ai).
+<p align="center">
+  <strong>
+    To run demo queries directly on our web interface, visit
+    <a href="https://virtualbiotech.ai">virtualbiotech.ai</a>.
+  </strong>
+</p>
 
 The Virtual Biotech is a multi-agent AI framework for therapeutic discovery
 and development. It models a cross-functional therapeutic research organization:
