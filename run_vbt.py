@@ -2,16 +2,10 @@
 """
 run_vbt.py — headless runner, replay driver and verifier for The Virtual Biotech.
 
-The web interface is one front end onto a session; this is the other. It runs the
-same CSO, the same specialists, the same MCP servers, and produces the same
-self-describing run directory — which is what makes a run scriptable, batchable
-and replayable.
-
-Reuses ``CSOSession`` from gradio_cso_app rather than reimplementing it, so the
-headless path cannot drift from what the web app actually does. (``gradio_cso_app``
-and ``run_casestudy_costing`` already carry near-identical copies of the session
-setup; consolidating those is worthwhile but is a separate change, and one that
-should not be made without being able to run the app to check it.)
+Start with ``python run.py`` for a conversational CLI session with follow-up
+questions. This module provides optional batch runs, replay and audit commands.
+It reuses ``CSOSession`` from gradio_cso_app; all three interfaces share
+specialist definitions and the live audit lifecycle.
 
 Usage::
 
@@ -82,31 +76,41 @@ async def _run_turns(turns: list[str], model_key: str, session_id: str = None,
     session_id = session_id or str(_uuid.uuid4())
     history: list = []
 
-    for i, turn in enumerate(turns, 1):
-        if not quiet:
-            print(f"\n{'=' * 72}\nTurn {i}/{len(turns)}: {turn[:100]}\n{'=' * 72}")
-        last = None
-        async for result in app.async_process_message(
-            turn, history, session_id, model_key=model_key
-        ):
-            last = result
-        if last:
-            history = last[0]
-            session_id = last[2]
-            if not quiet and history and history[-1].get("role") == "assistant":
-                print(history[-1]["content"])
-
-    session = app.session_manager.sessions.get(session_id)
-    if session is None or session.run is None:
-        print("\n[ERROR] No run directory was created.", file=sys.stderr)
-        return None
-
+    session = None
     try:
-        await session.cleanup()
-    except Exception as e:
-        print(f"[WARNING] cleanup: {e}", file=sys.stderr)
-
-    return session.run.run_dir
+        for i, turn in enumerate(turns, 1):
+            if not quiet:
+                print(f"\n{'=' * 72}\nTurn {i}/{len(turns)}: {turn[:100]}\n{'=' * 72}")
+            previous = app.session_manager.sessions.get(session_id)
+            before = len(previous.turns) if previous else 0
+            last = None
+            async for result in app.async_process_message(
+                turn, history, session_id, model_key=model_key
+            ):
+                last = result
+            if last:
+                history = last[0]
+                session_id = last[2]
+                if not quiet and history and history[-1].get("role") == "assistant":
+                    print(history[-1]["content"])
+            session = app.session_manager.sessions.get(session_id)
+            if (session is None or len(session.turns) == before
+                    or session.turns[-1].get("status") == "interrupted"):
+                print(f"\n[ERROR] Turn {i} did not complete.", file=sys.stderr)
+                if session is not None and session.run is not None:
+                    print(f"Saved run: {session.run.run_dir}", file=sys.stderr)
+                return None
+        if session is None or session.run is None:
+            print("\n[ERROR] No run directory was created.", file=sys.stderr)
+            return None
+        return session.run.run_dir
+    finally:
+        session = app.session_manager.sessions.get(session_id)
+        if session is not None:
+            try:
+                await session.cleanup()
+            except Exception as error:
+                print(f"[WARNING] cleanup: {error}", file=sys.stderr)
 
 
 def cmd_run(args) -> int:
@@ -123,7 +127,8 @@ def cmd_run(args) -> int:
     if run_dir is None:
         return 1
     _report_run(run_dir)
-    return 0
+    from src.utils.run_manifest import RunManifest
+    return 0 if RunManifest.load(run_dir).data["status"] == "completed" else 1
 
 
 # ── Replay ───────────────────────────────────────────────────────────
@@ -150,7 +155,8 @@ def cmd_replay(args) -> int:
         return 2
 
     cfg = original.data.get("config", {})
-    model_key = cfg.get("specialist_model_label", "Sonnet 4.5 (default)")
+    model_key = (cfg.get("specialist_model_label") or cfg.get("specialist_model")
+                 or cfg.get("model") or DEFAULT_MODEL_ID)
 
     print(f"Replaying {original.run_id}")
     print(f"  turns:   {len(turns)}")
@@ -328,7 +334,7 @@ def _report_run(run_dir) -> None:
     m = RunManifest.load(run_dir)
     s = m.summary()
     print(f"\n{'=' * 72}")
-    print(f"Run complete: {m.run_id}")
+    print(f"Run {m.data.get('status', 'unknown')}: {m.run_id}")
     print(f"  directory   {run_dir}")
     print(f"  artifacts   {s['n_artifacts']} ({s['artifacts_by_kind']})")
     print(f"  specialists {', '.join(s['agents']) or 'none'}")

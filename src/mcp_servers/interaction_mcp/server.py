@@ -22,6 +22,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from fastmcp import FastMCP
+from src.mcp_servers.registration import register_tool
 from src.mcp_servers.interaction_mcp.tools import (
     get_interactions,
     search_interactions,
@@ -34,11 +35,11 @@ from src.mcp_servers.interaction_mcp.tools import (
 mcp = FastMCP("Interaction MCP")
 
 # Register tools
-mcp.tool()(get_interactions)
-mcp.tool()(search_interactions)
-mcp.tool()(get_interaction_evidence)
-mcp.tool()(get_interaction_network)
-mcp.tool()(find_common_interactors)
+register_tool(mcp, get_interactions)
+register_tool(mcp, search_interactions)
+register_tool(mcp, get_interaction_evidence)
+register_tool(mcp, get_interaction_network)
+register_tool(mcp, find_common_interactors)
 
 if __name__ == "__main__":
     # Run server

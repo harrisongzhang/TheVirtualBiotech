@@ -12,9 +12,13 @@ Outputs:
 
 import json
 import time
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from src.utils.run_storage import write_text_atomic
+from src.utils.tool_errors import tool_result_error
 
 
 def _truncate(obj: Any, max_chars: int) -> str:
@@ -35,13 +39,28 @@ class TraceLogger:
         trace.write_jsonl(path)
     """
 
-    def __init__(self):
+    def __init__(self, path: Path = None):
         self.events: list[dict[str, Any]] = []
         self._agent_t0: dict[str, float] = {}
         self._tool_t0: dict[str, float] = {}
+        self._path = None
+        self._lock = threading.RLock()
+        if path is not None:
+            self.bind(path)
+
+    def bind(self, path: Path) -> None:
+        """Persist events as they arrive, so in-flight claims can cite them."""
+        with self._lock:
+            self._path = Path(path)
+            self.write_jsonl(self._path)
 
     def _emit(self, etype: str, **kw) -> None:
-        self.events.append({"type": etype, "ts": datetime.now().isoformat(), **kw})
+        event = {"type": etype, "ts": datetime.now().isoformat(), **kw}
+        with self._lock:
+            self.events.append(event)
+            if self._path is not None:
+                with self._path.open('a', encoding='utf-8') as handle:
+                    handle.write(json.dumps(event, default=str) + '\n')
 
     # ── Agent lifecycle ──────────────────────────────────────────────
 
@@ -75,10 +94,12 @@ class TraceLogger:
                  tool_response: Any, is_error: bool = False, agent: str = None):
         t0 = self._tool_t0.pop(tool_use_id, None)
         dur = round((time.monotonic() - t0) * 1000, 1) if t0 is not None else None
+        error = tool_result_error(tool_response)
         self._emit("tool_end", tool_use_id=tool_use_id, tool_name=tool_name,
                     tool_input=tool_input,
                     tool_response=_truncate(tool_response, 10_000),
-                    is_error=is_error, duration_ms=dur, agent=agent)
+                    is_error=bool(is_error or error), error=error,
+                    duration_ms=dur, agent=agent)
 
     def tool_error(self, tool_use_id: str, tool_name: str, tool_input: dict,
                    error: str, agent: str = None):
@@ -95,12 +116,12 @@ class TraceLogger:
 
     def extract_thinking(self, events: list[dict] = None) -> list[str]:
         """Extract thinking/reasoning texts from events."""
-        return [e["text"] for e in (events or self.events)
+        return [e["text"] for e in (self.events if events is None else events)
                 if e["type"] == "thinking"]
 
     def extract_subagent_traces(self, events: list[dict] = None) -> list[dict]:
         """Build per-agent summaries from agent_start/stop pairs."""
-        evs = events or self.events
+        evs = self.events if events is None else events
         pending: dict[str, dict] = {}
         traces: list[dict] = []
         for ev in evs:
@@ -136,9 +157,70 @@ class TraceLogger:
 
     def write_jsonl(self, path: Path) -> None:
         """Write all events as newline-delimited JSON."""
-        with open(path, "w") as f:
-            for ev in self.events:
-                f.write(json.dumps(ev, default=str) + "\n")
+        with self._lock:
+            write_text_atomic(path, ''.join(json.dumps(ev, default=str) + '\n'
+                                           for ev in self.events))
+
+
+def agents_in_events(events: list[dict]) -> list[str]:
+    """Ordered agent identities from lifecycle hooks and both dispatch formats."""
+    agents = []
+    for event in events:
+        agent = event.get('agent_type') or event.get('agent')
+        if event.get('tool_name') in ('Task', 'Agent'):
+            data = event.get('tool_input') or {}
+            agent = data.get('subagent_type') or data.get('agent_type') or agent
+        if agent and agent not in ('cso', '_cso', 'unknown') and agent not in agents:
+            agents.append(agent)
+    return agents
+
+
+def tool_failures(events: list[dict]) -> list[dict]:
+    """All observed operational failures, including attempts later recovered."""
+    failures = {}
+    for event in events:
+        if event.get('type') != 'tool_error' and not event.get('is_error'):
+            continue
+        key = event.get('tool_use_id') or str(len(failures))
+        failures[key] = {
+            'tool_use_id': event.get('tool_use_id'),
+            'tool_name': event.get('tool_name', 'unknown'),
+            'error': str(event.get('error') or event.get('tool_response') or 'Tool failed')[:2000],
+        }
+    return list(failures.values())
+
+
+def unresolved_tool_failures(events: list[dict]) -> list[dict]:
+    """Failures without a later successful call of the same tool and arguments.
+
+    A successful retry restores that query's availability without deleting its
+    failed attempt from the trace. Different inputs cannot resolve one another:
+    successful retrieval for another target does not establish the first result.
+    """
+    pending = {}
+    started = {}
+    for event in events:
+        kind = event.get('type')
+        identifier = event.get('tool_use_id')
+        if kind == 'tool_start':
+            started[identifier] = event
+            continue
+        if kind not in ('tool_end', 'tool_error'):
+            continue
+        initial = started.get(identifier, {})
+        name = event.get('tool_name') or initial.get('tool_name', 'unknown')
+        inputs = event.get('tool_input')
+        if inputs is None:
+            inputs = initial.get('tool_input') or {}
+        key = (name, json.dumps(inputs, sort_keys=True, default=str))
+        if kind == 'tool_error' or event.get('is_error'):
+            pending[key] = {
+                'tool_use_id': identifier, 'tool_name': name,
+                'error': str(event.get('error') or event.get('tool_response') or 'Tool failed')[:2000],
+            }
+        else:
+            pending.pop(key, None)
+    return list(pending.values())
 
 
 # ── Per-agent cost from transcript usage data ────────────────────────
@@ -270,11 +352,17 @@ def parse_agent_transcript(transcript_path: str,
                                 "input": blk.get("input"),
                             })
                         elif bt == "tool_result":
+                            raw_result = blk.get("content", "")
+                            # Determine semantics before rendering/truncation:
+                            # repr(list/dict) is no longer a parseable JSON
+                            # envelope, and large results may lose the error.
+                            error = tool_result_error(raw_result)
                             tresults.append({
                                 "tool_use_id": blk.get("tool_use_id"),
                                 "content": _truncate(
-                                    blk.get("content", ""), max_tool_output),
-                                "is_error": blk.get("is_error", False),
+                                    raw_result, max_tool_output),
+                                "is_error": bool(blk.get("is_error", False) or error),
+                                "error": error,
                             })
                     if texts:
                         record["content"] = "\n".join(texts)

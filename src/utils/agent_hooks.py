@@ -4,15 +4,14 @@ Agent Hooks for The Virtual Biotech
 Provides SDK-native hooks (PreToolUse, PostToolUse, SubagentStop, Stop)
 for security, auditing, cost tracking, and lifecycle management.
 
-These hooks replace the older can_use_tool callback approach with the
-standard Claude Agent SDK hooks API, which supports system message
-injection, input modification, and hook chaining.
+The hooks and can_use_tool callback share permission checks so parent and
+specialist calls follow the same file-access rules.
 
 Usage:
-    from src.utils.agent_hooks import build_hooks, SecurityConfig
+    from src.utils.agent_hooks import build_security_hooks, SecurityConfig
 
     config = SecurityConfig(workspace_dir="/path/to/workspace")
-    hooks = build_hooks(config)
+    hooks = build_security_hooks(config)
 
     options = ClaudeAgentOptions(
         hooks=hooks,
@@ -24,13 +23,17 @@ import os
 import re
 import shlex
 from pathlib import Path
-from typing import Any, Union
 
 from claude_agent_sdk.types import (
     PreToolUseHookInput,
     HookContext,
     SyncHookJSONOutput,
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ToolPermissionContext,
 )
+
+from src.utils.runtime_paths import RuntimePaths
 
 
 # =============================================================================
@@ -51,6 +54,7 @@ class SecurityConfig:
         block_destructive_db: bool = True,
         block_system_commands: bool = True,
         enforce_path_sandbox: bool = True,
+        runtime_paths: RuntimePaths | None = None,
     ):
         self.workspace_dir = str(Path(workspace_dir).resolve())
         self.app_source_dir = str(Path(app_source_dir).resolve()) if app_source_dir else None
@@ -59,6 +63,7 @@ class SecurityConfig:
         self.block_destructive_db = block_destructive_db
         self.block_system_commands = block_system_commands
         self.enforce_path_sandbox = enforce_path_sandbox
+        self.runtime_paths = runtime_paths
 
         # Resolved paths for sandbox enforcement
         self.write_allowed = [self.workspace_dir]
@@ -74,6 +79,38 @@ class SecurityConfig:
         if blocked_read_dirs:
             for d in blocked_read_dirs:
                 self.blocked_read_dirs.append(str(Path(d).resolve()))
+
+    def resolve_path(self, path: str, cwd: str | None = None) -> Path:
+        """Keep relative tool paths relative to the session, not the app process."""
+        candidate = Path(path).expanduser()
+        return candidate if candidate.is_absolute() else Path(cwd or self.workspace_dir) / candidate
+
+    def is_runtime_path(self, path: Path) -> bool:
+        if not self.runtime_paths:
+            return False
+        return self.runtime_paths.covers(path.absolute()) or self.runtime_paths.covers(path.resolve())
+
+    def allows_read(self, path: str, cwd: str | None = None) -> bool:
+        try:
+            candidate = self.resolve_path(path, cwd)
+            # Explicit blocks also apply when a runtime directory was configured
+            # inside a broader normally-readable root.
+            if _is_path_within(str(candidate), self.blocked_read_dirs):
+                return False
+            if self.is_runtime_path(candidate):
+                return self.runtime_paths.allows_read(candidate)
+            return _is_path_within(str(candidate), self.read_allowed, self.blocked_read_dirs)
+        except (OSError, ValueError, RuntimeError):
+            return False
+
+    def allows_write(self, path: str, cwd: str | None = None) -> bool:
+        try:
+            candidate = self.resolve_path(path, cwd)
+            return not self.is_runtime_path(candidate) and _is_path_within(
+                str(candidate), self.write_allowed, self.blocked_read_dirs,
+            )
+        except (OSError, ValueError, RuntimeError):
+            return False
 
 
 # =============================================================================
@@ -98,7 +135,7 @@ def _is_path_within(path_str: str, allowed_roots: list[str],
             resolved == root or resolved.startswith(root + os.sep)
             for root in allowed_roots
         )
-    except (ValueError, OSError):
+    except (ValueError, OSError, RuntimeError):
         return False
 
 
@@ -145,9 +182,77 @@ def _extract_paths_from_command(command: str, cwd: str) -> list[str]:
             p = Path(cleaned) if os.path.isabs(cleaned) else Path(cwd) / cleaned
             try:
                 paths.append(str(p.resolve()))
-            except (ValueError, OSError):
+            except (ValueError, OSError, RuntimeError):
                 paths.append(str(p))
     return paths
+
+
+def _bash_path_denial(command: str, cwd: str, config: SecurityConfig) -> str | None:
+    """Apply file permissions to shell paths, including output redirections.
+
+    Reading a spill file never confers write access to runtime storage. Shell
+    programs with arbitrary code execution cannot be classified as read-only;
+    use the file tools for those inputs or copy their text into the workspace.
+    """
+    paths = _extract_paths_from_command(command, cwd)
+    for path in paths:
+        if not config.allows_read(path, cwd):
+            return f"Command references path outside allowed directories: {path}"
+
+    try:
+        lexer = shlex.shlex(_strip_heredocs(command), posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return "Cannot safely parse shell command; use Read/Write tools for file operations."
+
+    for index, token in enumerate(tokens):
+        if token in (">", ">>", "&>", "&>>", ">|", "<>"):
+            target = tokens[index + 1] if index + 1 < len(tokens) else ""
+            if target == "/dev/null":
+                continue
+            if not target or not config.allows_write(target, cwd):
+                return f"Shell output is restricted to the session workspace: {target}"
+
+    runtime = config.runtime_paths
+    uses_runtime = runtime and (
+        str(runtime.config_dir) in command
+        or str(runtime.temp_dir) in command
+        or any(config.is_runtime_path(Path(path)) for path in paths)
+        or config.is_runtime_path(Path(cwd))
+    )
+    if uses_runtime:
+        # These commands read their file arguments and write only to stdout.
+        # Avoid interpreters, sed -i/e/w, rg --pre, or sort -o being used to
+        # write into the newly readable runtime directories.
+        readers = {"cat", "head", "tail", "wc", "grep", "cut"}
+        if any(marker in command for marker in ("$", "`", "\n", "<(", ">(")) or any(
+            token in ("<<", "<<<", "&", "|&", "(", ")") for token in tokens
+        ):
+            return "Runtime output permits simple read commands only; use Read/Glob/Grep for these files."
+        expect_command = True
+        skip_target = False
+        reader = None
+        for token in tokens:
+            if skip_target:
+                skip_target = False
+                continue
+            if token in (">", ">>", "<", "&>", "&>>", ">|", "<>"):
+                skip_target = True
+                continue
+            if token in ("|", "||", "&&", ";"):
+                expect_command = True
+                continue
+            if expect_command:
+                if token not in readers:
+                    return "Runtime output permits simple read commands only; use Read/Glob/Grep for these files."
+                reader = token
+                expect_command = False
+            elif reader == "grep" and (
+                token.startswith(("--file", "--exclude-from")) or re.match(r"^-[^-]*f", token)
+            ):
+                return "Use Grep for runtime output searches requiring additional pattern files."
+    return None
 
 
 # =============================================================================
@@ -299,19 +404,13 @@ def create_bash_security_hook(config: SecurityConfig):
                         f"System command ({name}) is not allowed in this environment.",
                     )
 
-        # Layer 5: Path sandbox enforcement
-        # Use read_allowed (workspace + app source) since Bash commands mostly
-        # read/navigate; actual file writes are caught by Layer 2 (destructive FS).
+        # Layer 5: File paths and shell output must respect their respective
+        # read/write permissions. Runtime output is a narrow read-only grant.
         if config.enforce_path_sandbox:
-            paths_in_cmd = _extract_paths_from_command(command, cwd)
-            for path in paths_in_cmd:
-                if not _is_path_within(path, config.read_allowed, config.blocked_read_dirs):
-                    print(f"[HOOK:SECURITY] BLOCKED path: {path} | cmd: {command[:200]}")
-                    return _deny_with_message(
-                        f"Command references path outside allowed directories: {path}",
-                        f"This command references a path outside your workspace and app source ({path}). "
-                        f"Use Read/Glob/Grep tools to access other files.",
-                    )
+            denial = _bash_path_denial(command, cwd, config)
+            if denial:
+                print(f"[HOOK:SECURITY] BLOCKED path operation: {denial}")
+                return _deny_with_message(denial, denial)
 
         # All checks passed — allow
         return {}
@@ -333,7 +432,7 @@ def create_file_write_security_hook(config: SecurityConfig):
             input_data["tool_input"].get("file_path", "")
             or input_data["tool_input"].get("notebook_path", "")
         )
-        if file_path and not _is_path_within(file_path, config.write_allowed):
+        if file_path and not config.allows_write(file_path, input_data.get("cwd")):
             print(f"[HOOK:SECURITY] BLOCKED write outside workspace: {file_path}")
             return _deny_with_message(
                 f"File writes restricted to session workspace ({config.workspace_dir}). "
@@ -356,11 +455,29 @@ def create_file_read_security_hook(config: SecurityConfig):
         tool_use_id: str | None,
         context: HookContext,
     ) -> SyncHookJSONOutput:
+        cwd = input_data.get("cwd", config.workspace_dir)
         file_path = (
             input_data["tool_input"].get("file_path", "")
             or input_data["tool_input"].get("path", "")
+            or cwd
         )
-        if file_path and not _is_path_within(file_path, config.read_allowed, config.blocked_read_dirs):
+        paths = [file_path]
+        if input_data.get("tool_name") == "Glob":
+            pattern = input_data["tool_input"].get("pattern", "")
+            if ".." in Path(pattern).parts:
+                return _deny_with_message(
+                    "Glob patterns cannot traverse parent directories.",
+                    "Set path to an allowed directory and use a pattern within that directory.",
+                )
+            # Glob can override its path with an absolute pattern. Check the
+            # literal prefix before wildcards as well as the search directory.
+            prefix = re.split(r"[*?\[]", pattern, maxsplit=1)[0]
+            if prefix:
+                search_dir = str(config.resolve_path(file_path, cwd))
+                paths.append(str(config.resolve_path(prefix, search_dir)))
+        denied = next((path for path in paths if not config.allows_read(path, cwd)), None)
+        if denied is not None:
+            file_path = denied
             print(f"[HOOK:SECURITY] BLOCKED read outside allowed dirs: {file_path}")
             return _deny_with_message(
                 f"File reads restricted to workspace and app source. "
@@ -439,119 +556,46 @@ def build_security_hooks(config: SecurityConfig) -> dict:
 
 
 def build_security_callback(config: SecurityConfig):
-    """
-    Build a can_use_tool callback for subagent tool permission control.
+    """Apply the same checks when the runtime asks for a tool permission.
 
-    SDK hooks (PreToolUse etc.) do NOT propagate to subagents. The
-    can_use_tool callback *does* apply to subagent tool calls, so we
-    use it alongside hooks to ensure MCP tools and sandboxed file ops
-    work correctly for specialist subagents in headless (web app) mode.
-
-    Returns a callable suitable for ClaudeAgentOptions(can_use_tool=...).
+    The pinned client passes a ToolPermissionContext instance and requires
+    typed permission results. Sharing checks with the hooks prevents the two
+    enforcement layers from disagreeing on runtime spill-file access.
     """
+    bash_hook = create_bash_security_hook(config)
+    read_hook = create_file_read_security_hook(config)
+    write_hook = create_file_write_security_hook(config)
 
     async def security_callback(
         tool_name: str,
         input_data: dict,
-        context: dict,
+        context: ToolPermissionContext,
     ):
-        cwd = context.get("cwd", config.workspace_dir)
-        session_workspace = str(Path(cwd).resolve())
-
-        write_allowed = [session_workspace]
-        read_allowed = list(config.read_allowed)  # workspace + app source + extras
-        blocked = config.blocked_read_dirs
-
-        # ── Write/Edit tools: workspace only ──────────────────────────────
+        # Older test adapters may supply a mapping, but the runtime context has
+        # no cwd field. Neither form can widen the configured write workspace.
+        cwd = (
+            context.get("cwd", config.workspace_dir)
+            if isinstance(context, dict) else config.workspace_dir
+        )
+        hook_input = {
+            "tool_name": tool_name,
+            "tool_input": input_data,
+            "cwd": cwd,
+        }
+        hook = None
         if tool_name in ("Write", "Edit", "NotebookEdit"):
-            file_path = (
-                input_data.get("file_path", "") or input_data.get("notebook_path", "")
-            )
-            if file_path and not _is_path_within(file_path, write_allowed):
-                print(f"[CALLBACK:SECURITY] BLOCKED {tool_name} outside workspace: {file_path}")
-                return {
-                    "behavior": "deny",
-                    "message": (
-                        f"File writes are restricted to your session workspace "
-                        f"({session_workspace}). Cannot write to: {file_path}"
-                    ),
-                }
-            return {"behavior": "allow", "updatedInput": input_data}
-
-        # ── Read tools: workspace + app source ────────────────────────────
-        if tool_name in ("Read", "Glob", "Grep"):
-            file_path = input_data.get("file_path", "") or input_data.get("path", "")
-            if file_path and not _is_path_within(file_path, read_allowed, blocked):
-                print(f"[CALLBACK:SECURITY] BLOCKED {tool_name} outside allowed dirs: {file_path}")
-                return {
-                    "behavior": "deny",
-                    "message": (
-                        f"File reads are restricted to your workspace and app source. "
-                        f"Cannot access: {file_path}"
-                    ),
-                }
-            return {"behavior": "allow", "updatedInput": input_data}
-
-        # ── Bash: multi-layered security checks ──────────────────────────
-        if tool_name == "Bash":
-            command = input_data.get("command", "")
-            command_shell = _strip_heredocs(command)
-
-            if config.block_pkg_install:
-                for pattern, name in PKG_INSTALL_PATTERNS:
-                    if re.search(pattern, command_shell, re.IGNORECASE):
-                        print(f"[CALLBACK:SECURITY] BLOCKED package install: {name} | cmd: {command[:200]}")
-                        return {
-                            "behavior": "deny",
-                            "message": f"Package installation is prohibited: '{name}'",
-                        }
-
-            if config.block_destructive_fs:
-                for pattern, name in DESTRUCTIVE_FS_PATTERNS:
-                    if re.search(pattern, command_shell, re.IGNORECASE):
-                        print(f"[CALLBACK:SECURITY] BLOCKED destructive FS: {name} | cmd: {command[:200]}")
-                        return {
-                            "behavior": "deny",
-                            "message": (
-                                f"Command blocked for security: '{name}'. "
-                                f"Use Write/Edit tools for file operations within your workspace."
-                            ),
-                        }
-
-            if config.block_destructive_db:
-                for pattern, name in DESTRUCTIVE_DB_PATTERNS:
-                    if re.search(pattern, command_shell, re.IGNORECASE):
-                        print(f"[CALLBACK:SECURITY] BLOCKED destructive DB: {name} | cmd: {command[:200]}")
-                        return {
-                            "behavior": "deny",
-                            "message": f"Destructive database command blocked: '{name}'",
-                        }
-
-            if config.block_system_commands:
-                for pattern, name in SYSTEM_CMD_PATTERNS:
-                    if re.search(pattern, command_shell, re.IGNORECASE):
-                        print(f"[CALLBACK:SECURITY] BLOCKED system cmd: {name} | cmd: {command[:200]}")
-                        return {
-                            "behavior": "deny",
-                            "message": f"System command blocked: '{name}'",
-                        }
-
-            if config.enforce_path_sandbox:
-                paths_in_cmd = _extract_paths_from_command(command, cwd)
-                for path in paths_in_cmd:
-                    if not _is_path_within(path, read_allowed, blocked):
-                        print(f"[CALLBACK:SECURITY] BLOCKED path: {path} | cmd: {command[:200]}")
-                        return {
-                            "behavior": "deny",
-                            "message": (
-                                f"Command references path outside allowed directories: {path}. "
-                                f"Use Read/Glob/Grep tools to access other files."
-                            ),
-                        }
-
-            return {"behavior": "allow", "updatedInput": input_data}
-
-        # ── All other tools (MCP, Task, TodoWrite, Skill, WebSearch) ─────
-        return {"behavior": "allow", "updatedInput": input_data}
+            hook = write_hook
+        elif tool_name in ("Read", "Glob", "Grep"):
+            hook = read_hook
+        elif tool_name == "Bash":
+            hook = bash_hook
+        if hook is not None:
+            result = await hook(hook_input, getattr(context, "tool_use_id", None), {})
+            decision = result.get("hookSpecificOutput", {})
+            if decision.get("permissionDecision") == "deny":
+                return PermissionResultDeny(
+                    message=decision.get("permissionDecisionReason", "Access denied"),
+                )
+        return PermissionResultAllow(updated_input=input_data)
 
     return security_callback

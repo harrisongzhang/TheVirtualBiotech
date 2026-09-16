@@ -6,10 +6,13 @@ Reviewer comment R2.5 asked to be able to replay analyses and reproduce them.
 That splits into two guarantees which are worth keeping apart, because conflating
 them would overclaim:
 
-**Integrity (exact, always available).** Every artifact is re-hashed against
-MANIFEST.json, and every claim's evidence pointer is re-resolved. This answers
-"has anything changed since the run, and does the evidence still hold up?" It is
-deterministic and needs nothing but the directory.
+**Artifact integrity.** Every artifact is re-hashed against MANIFEST.json. This
+answers "has anything changed since the run?"
+
+**Evidence coverage.** Filed claims and their local evidence pointers are checked,
+along with the claim references in the final report. A research run with no
+claims has incomplete auditing even when its files are unchanged. These checks
+establish a recorded evidence trail; they do not verify scientific conclusions.
 
 **Re-execution (exact, opt-in).** The agent-written analysis scripts under
 ``work/*/code/`` are re-run and their outputs re-hashed. The *code* an agent wrote
@@ -39,16 +42,179 @@ import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
-from src.utils.claims import ClaimSet, validate_claims
+from src.utils.claims import find_claim_refs, validate_claims
 from src.utils.provenance import build_provenance
-from src.utils.run_manifest import RunManifest, sha256_file
+from src.utils.run_manifest import CSO_DIR, RunManifest, sha256_file
+
+
+def assess_evidence_coverage(manifest, claim_set=None, provenance=None,
+                             final_text=None, *, finalizing=False) -> dict[str, Any]:
+    """Check recorded evidence pointers and final-report references.
+
+    New runners set ``config.audit_required`` when scientific analysis starts.
+    For older runs, analytical artifacts or specialist execution supply that
+    signal. Greeting and administrative sessions do not need scientific claims.
+    Claim references are always checked, including in non-research sessions.
+    """
+    run_dir = manifest.run_dir
+    config = manifest.data.get("config") or {}
+    if provenance is None:
+        provenance = build_provenance(run_dir / "logs" / "trace.jsonl")
+    explicit = config.get("audit_required")
+    if isinstance(explicit, bool):
+        required = explicit
+    else:
+        administrative = {CSO_DIR, "cso", "chief-of-staff", "scientific-reviewer"}
+        agents = set(provenance.specialist_types())
+        agents.update(e.get("agent") for e in manifest.data.get("execution", []))
+        required = bool(agents - administrative - {None, "", "unknown"}) or any(
+            a.get("kind") in {"code", "data", "table", "figure", "report"}
+            for a in manifest.data.get("artifacts", {}).values()
+        )
+
+    out: dict[str, Any] = {
+        "required": required, "total": 0, "unresolvable": 0,
+        "without_verified_evidence": 0, "reference_count": 0,
+        "dangling_references": [], "problems": [],
+    }
+    problems = out["problems"]
+    if manifest.data.get("status") == "in_progress" and not finalizing:
+        problems.append({"kind": "unfinished_run", "detail":
+                         "A research turn is still in progress or its audit has not finished saving."})
+    claims_path = run_dir / "evidence" / "claims.json"
+    if claim_set is None:
+        raw = []
+        if claims_path.exists():
+            try:
+                raw = json.loads(claims_path.read_text())
+                raw = raw.get("claims", []) if isinstance(raw, dict) else raw
+                if not isinstance(raw, list):
+                    raise ValueError("claims must be a list")
+            except (OSError, ValueError) as exc:
+                problems.append({"kind": "invalid_claims", "detail":
+                                 f"evidence/claims.json cannot be read: {exc}"})
+                raw = []
+    else:
+        raw = claim_set.claims
+    out["total"] = len(raw)
+    result = validate_claims(raw, manifest, provenance, strict=True)
+    out["unresolvable"] = len(result.errors)
+    out["without_verified_evidence"] = sum(
+        c["n_verified"] == 0 for c in result.claims
+    )
+    problems.extend({"kind": "claim_unresolvable", "detail": e}
+                    for e in result.errors)
+    if required and not raw:
+        problems.append({"kind": "no_claims", "detail":
+                         "Scientific analysis was recorded, but no claims were filed; "
+                         "the evidence audit is incomplete."})
+
+    final_path = run_dir / "report" / "FINAL_REPORT.md"
+    out["final_report_present"] = final_text is not None or final_path.is_file()
+    if final_text is None:
+        try:
+            final_text = final_path.read_text() if final_path.is_file() else ""
+        except (OSError, UnicodeError) as exc:
+            final_text = ""
+            problems.append({"kind": "unreadable_final_report", "detail":
+                             f"report/FINAL_REPORT.md cannot be read: {exc}"})
+    refs = find_claim_refs(final_text)
+    out["reference_count"] = len(refs)
+    filed_ids = {c["id"] for c in result.claims}
+    dangling = sorted(set(refs) - filed_ids)
+    out["dangling_references"] = dangling
+    if dangling:
+        problems.append({"kind": "dangling_claim_references", "detail":
+                         "The final report references claims that were not validly filed: "
+                         + ", ".join(dangling)})
+    if required and explicit is True and not final_text.strip():
+        problems.append({"kind": "missing_final_report", "detail":
+                         "The research run has no recorded final response."})
+    elif required and final_text.strip() and not refs:
+        problems.append({"kind": "missing_claim_references", "detail":
+                         "The final report contains no claim references, so its "
+                         "conclusions are not linked to the recorded evidence."})
+
+    # A prior turn's citations do not cover new research in a follow-up. New
+    # sessions persist which turns performed research; older reports continue
+    # to use the aggregate check above when this metadata is unavailable.
+    recorded_turns = config.get("research_turns") or []
+    if not isinstance(recorded_turns, list) or not all(type(n) is int and n > 0 for n in recorded_turns):
+        problems.append({"kind": "invalid_turn_record", "detail":
+                         "The research-turn inventory must contain positive integer turn numbers."})
+        recorded_turns = []
+    research_turns = set(recorded_turns)
+    has_turn_metadata = "research_turns" in config
+    turns = []
+    turn_report = run_dir / "logs" / "cost_report.json"
+    if turn_report.is_file():
+        try:
+            turn_data = json.loads(turn_report.read_text())
+            turns = turn_data.get("turns", []) if isinstance(turn_data, dict) else []
+            if not isinstance(turns, list) or not all(isinstance(t, dict) for t in turns):
+                raise ValueError("turns must be a list of turn records")
+            has_turn_metadata = has_turn_metadata or any("audit_required" in t for t in turns)
+        except (OSError, ValueError) as exc:
+            if has_turn_metadata:
+                problems.append({"kind": "invalid_turn_record", "detail":
+                                 f"Per-turn evidence coverage cannot be read: {exc}"})
+            turns = []
+    if has_turn_metadata:
+        seen = set()
+        for turn in turns:
+            number = turn.get("turn")
+            if (type(number) is not int or number < 1 or number in seen
+                    or not isinstance(turn.get("response", ""), str)
+                    or ("audit_required" in turn and type(turn["audit_required"]) is not bool)):
+                problems.append({"kind": "invalid_turn_record", "detail":
+                                 "A saved turn has an invalid or duplicate number, response, or audit requirement."})
+                continue
+            seen.add(number)
+            if not (turn.get("audit_required") or number in research_turns):
+                continue
+            research_turns.add(number)
+            turn_refs = set(find_claim_refs(turn.get("response", "")))
+            if not turn_refs.intersection(filed_ids):
+                problems.append({"kind": "missing_turn_claim_references", "turn": number,
+                                 "detail": f"Research turn {number} has no valid claim references; "
+                                           "an earlier turn's citations do not cover its findings."})
+            unresolved = sorted(turn_refs - filed_ids)
+            if unresolved:
+                problems.append({"kind": "dangling_turn_claim_references", "turn": number,
+                                 "detail": f"Turn {number} references claims that are not validly filed: "
+                                           + ", ".join(unresolved)})
+        for number in research_turns - seen:
+            problems.append({"kind": "missing_turn_record", "turn": number,
+                             "detail": f"Research turn {number} has no saved response record."})
+    out["research_turns"] = sorted(research_turns)
+
+    for error in config.get("audit_errors") or []:
+        problems.append({"kind": "audit_capture_error", "detail": str(error)})
+    interrupted_turns = config.get("interrupted_turns") or []
+    for turn in interrupted_turns:
+        problems.append({"kind": "interrupted_turn", "turn": turn,
+                         "detail": f"Turn {turn} was interrupted; its response or evidence record may be incomplete."})
+    if manifest.data.get("status") == "interrupted" and not interrupted_turns:
+        problems.append({"kind": "interrupted_turn",
+                         "detail": "The research run was interrupted; its response or evidence record may be incomplete."})
+    for error in config.get("data_source_errors") or []:
+        detail = (f"{error.get('tool_name', 'Data source')}: {error.get('error', 'unavailable')}"
+                  if isinstance(error, dict) else str(error))
+        problems.append({"kind": "data_source_unavailable", "detail": detail})
+
+    out["ok"] = not problems
+    out["status"] = ("incomplete" if problems else
+                     "complete" if required or raw or refs else "not_required")
+    return out
 
 
 def verify_integrity(run_dir) -> dict[str, Any]:
-    """Re-hash every artifact and re-resolve every claim's evidence."""
+    """Check artifact integrity and evidence coverage independently."""
     run_dir = Path(run_dir)
     out: dict[str, Any] = {
-        "run_dir": str(run_dir), "checks": {}, "problems": [], "ok": True,
+        "run_dir": str(run_dir), "checks": {}, "problems": [], "ok": False,
+        "status": "failed", "integrity": {"ok": False, "status": "failed"},
+        "evidence": {"ok": False, "status": "unavailable"},
     }
 
     if not (run_dir / "MANIFEST.json").exists():
@@ -59,7 +225,11 @@ def verify_integrity(run_dir) -> dict[str, Any]:
         })
         return out
 
-    m = RunManifest.load(run_dir)
+    try:
+        m = RunManifest.load(run_dir)
+    except (OSError, ValueError) as exc:
+        out["problems"].append({"kind": "invalid_manifest", "detail": str(exc)})
+        return out
     out["run_id"] = m.run_id
     out["query"] = m.data.get("query", "")
 
@@ -78,24 +248,7 @@ def verify_integrity(run_dir) -> dict[str, Any]:
                             f"found {p.get('actual', '')[:12]}…)"),
         })
 
-    # 2. Claim evidence still resolves.
-    claims_path = run_dir / "evidence" / "claims.json"
-    if claims_path.exists():
-        prov = build_provenance(run_dir / "logs" / "trace.jsonl")
-        cs = ClaimSet.load(claims_path)
-        res = validate_claims(cs.claims, m, prov, strict=True)
-        out["checks"]["claims"] = {
-            "total": len(cs.claims),
-            "unresolvable": len(res.errors),
-            "without_verified_evidence":
-                len(cs.stats()["claims_without_verified_evidence"]),
-        }
-        for e in res.errors:
-            out["problems"].append({"kind": "claim_unresolvable", "detail": e})
-    else:
-        out["checks"]["claims"] = {"total": 0}
-
-    # 3. The run should describe itself.
+    # 2. The run should describe itself.
     for f in ("README.md", "MANIFEST.json"):
         if not (run_dir / f).exists():
             out["problems"].append({
@@ -103,7 +256,19 @@ def verify_integrity(run_dir) -> dict[str, Any]:
                 "detail": f"{f} is absent — regenerate with ./run.sh audit.",
             })
 
-    out["ok"] = not out["problems"]
+    out["integrity"] = {"ok": not out["problems"],
+                        "status": "failed" if out["problems"] else "passed"}
+
+    # 3. Unchanged files do not establish that scientific claims were recorded.
+    coverage = assess_evidence_coverage(m)
+    out["evidence"] = coverage
+    out["checks"]["claims"] = {
+        k: coverage[k] for k in ("total", "unresolvable", "without_verified_evidence")
+    }
+    out["problems"].extend(coverage["problems"])
+    out["ok"] = out["integrity"]["ok"] and coverage["ok"]
+    out["status"] = ("failed" if not out["integrity"]["ok"] else
+                     "incomplete" if not coverage["ok"] else "passed")
     return out
 
 
@@ -210,10 +375,11 @@ def verify_run(run_dir, rerun: bool = False,
                python_exe: Optional[str] = None) -> dict[str, Any]:
     """Full verification. Integrity always; re-execution only when asked."""
     report = verify_integrity(run_dir)
-    if rerun:
+    if rerun and "run_id" in report:
         report["rerun"] = rerun_scripts(run_dir, python_exe=python_exe)
         if not report["rerun"]["ok"]:
             report["ok"] = False
+            report["status"] = "failed"
             for s in report["rerun"]["scripts"]:
                 if s.get("status") != "ok":
                     report["problems"].append({
@@ -239,10 +405,17 @@ def format_report(report: dict[str, Any]) -> str:
     if a:
         L.append(f"Files:  {a['total']} recorded, {a['failed']} failed hash check")
     c = report["checks"].get("claims")
-    if c and c.get("total"):
+    if c is not None:
         L.append(f"Claims: {c['total']} filed, {c.get('unresolvable', 0)} with "
                  f"unresolvable evidence, "
                  f"{c.get('without_verified_evidence', 0)} with none verified")
+    integrity = report.get("integrity", {})
+    coverage = report.get("evidence", {})
+    if integrity:
+        L.append(f"Artifact integrity: {integrity['status'].upper()}")
+    if coverage:
+        status = coverage["status"].replace("_", " ").upper()
+        L.append(f"Evidence coverage:  {status}")
     if "rerun" in report:
         r = report["rerun"]
         okc = sum(1 for s in r["scripts"] if s.get("status") == "ok"
@@ -253,13 +426,19 @@ def format_report(report: dict[str, Any]) -> str:
 
     if report["ok"]:
         L.append("")
-        L.append("PASS — every artifact matches its recorded hash and every claim "
-                 "resolves.")
+        if coverage.get("status") == "not_required":
+            L.append("PASS — recorded files are unchanged; no scientific analysis "
+                     "requiring claims was recorded.")
+        else:
+            L.append("PASS — recorded files, claim pointers and report references "
+                     "passed structural checks.")
     else:
         L.append("")
-        L.append(f"FAIL — {len(report['problems'])} problem(s):")
+        status = "INCOMPLETE" if report.get("status") == "incomplete" else "FAIL"
+        L.append(f"{status} — {len(report['problems'])} problem(s):")
         for p in report["problems"][:25]:
             L.append(f"  [{p['kind']}] {p.get('detail', p.get('path', ''))}")
         if len(report["problems"]) > 25:
             L.append(f"  … and {len(report['problems']) - 25} more")
+    L.append("These checks do not verify scientific correctness or external citations.")
     return "\n".join(L)

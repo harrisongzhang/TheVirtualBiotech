@@ -38,6 +38,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from src.utils.run_manifest import sha256_file
+from src.utils.run_storage import write_json_atomic
+
 #: Inline reference to a claim from CSO prose.
 CLAIM_REF_RE = re.compile(r"\[\[claim:([A-Za-z0-9_.-]+)\]\]")
 
@@ -131,6 +134,18 @@ def validate_claims(
     if manifest is not None:
         known_paths = dict(manifest.data.get("artifacts", {}))
 
+    # Check a shared artifact once per submission, even when several claims
+    # cite it. Registry membership alone does not prove the file still exists.
+    artifact_errors: dict[str, Optional[str]] = {}
+    pending_calls: set[str] = set()
+    if provenance is not None:
+        for event in provenance.events:
+            tool_id = event.get("tool_use_id")
+            if event.get("type") == "tool_start":
+                pending_calls.add(tool_id)
+            elif event.get("type") in {"tool_end", "tool_error"}:
+                pending_calls.discard(tool_id)
+
     seen_ids: set[str] = set()
 
     for i, raw in enumerate(claims):
@@ -201,9 +216,37 @@ def validate_claims(
                         continue
                 else:
                     entry["path"] = rec["path"]
-                    entry["sha256"] = rec.get("sha256")
+                    # A filed claim refers to the version it was based on. A
+                    # later turn may rewrite the artifact and refresh the
+                    # registry, but cannot silently update that earlier claim.
+                    entry["sha256"] = ev.get("sha256", rec.get("sha256"))
                     entry["produced_by"] = rec.get("produced_by")
-                    entry["verified"] = True
+                    key = rec["path"]
+                    if key not in artifact_errors:
+                        problem = None
+                        try:
+                            actual = (manifest.run_dir / key).resolve(strict=True)
+                            if not actual.is_relative_to(manifest.run_dir.resolve()):
+                                problem = "is outside this run directory"
+                            elif not actual.is_file():
+                                problem = "is not a file"
+                            elif sha256_file(actual) != rec.get("sha256"):
+                                problem = "has changed since it was registered"
+                        except OSError as exc:
+                            problem = f"is missing or unreadable ({exc})"
+                        artifact_errors[key] = problem
+                    problem = artifact_errors[key]
+                    if (not problem and "sha256" in ev
+                            and ev["sha256"] != rec.get("sha256")):
+                        problem = ("has changed since this claim was filed; "
+                                   "review the updated artifact and refile the claim")
+                    if problem:
+                        msg = f"claim {cid}: evidence[{j}] artifact {key!r} {problem}"
+                        (res.errors if strict else res.warnings).append(msg)
+                        if strict:
+                            continue
+                    else:
+                        entry["verified"] = True
                     if ev.get("line"):
                         entry["line"] = ev["line"]
 
@@ -219,7 +262,20 @@ def validate_claims(
                     entry["tool_name"] = call.get("tool_name")
                     entry["agent"] = call.get("agent")
                     entry["ts"] = call.get("started_at")
-                    entry["verified"] = True
+                    if call.get("is_error"):
+                        msg = (f"claim {cid}: evidence[{j}] cites failed tool call "
+                               f"{tuid!r}; a failed query cannot support a finding")
+                        (res.errors if strict else res.warnings).append(msg)
+                        if strict:
+                            continue
+                    elif tuid in pending_calls:
+                        msg = (f"claim {cid}: evidence[{j}] cites unfinished tool call "
+                               f"{tuid!r}; wait for its result before citing it")
+                        (res.errors if strict else res.warnings).append(msg)
+                        if strict:
+                            continue
+                    else:
+                        entry["verified"] = True
                 else:
                     msg = (f"claim {cid}: evidence[{j}] cites tool call {tuid!r}, "
                            f"which does not appear in this run's trace")
@@ -302,7 +358,10 @@ class ClaimSet:
             return cls()
         with open(p) as f:
             data = json.load(f)
-        return cls(data.get("claims", data if isinstance(data, list) else []))
+        claims = data.get("claims", []) if isinstance(data, dict) else data
+        if not isinstance(claims, list):
+            raise ValueError("claims must be a list of claim objects")
+        return cls(claims)
 
     def by_id(self, cid: str) -> Optional[dict[str, Any]]:
         return next((c for c in self.claims if c["id"] == cid), None)
@@ -348,9 +407,7 @@ class ClaimSet:
 
     def write(self, path) -> Path:
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(self.to_dict(), f, indent=2, default=str)
+        write_json_atomic(path, self.to_dict())
         return path
 
 

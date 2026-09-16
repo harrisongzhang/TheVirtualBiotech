@@ -15,7 +15,7 @@
 #   ./run.sh audit <session_dir>        rebuild an audit trail for an old session
 #   ./run.sh index                      rebuild runs/INDEX.md
 #   ./run.sh doctor [--skip-api-key] [--smoke]  check local setup; no model requests
-#   ./run.sh test                       run the audit test suite
+#   ./run.sh test                       run the regression test suite
 #   ./run.sh web [--share]              launch the optional web interface
 #
 # Environment:
@@ -143,16 +143,11 @@ print(f'{len(rows)} run(s) indexed → $RUNS_DIR/INDEX.md')
 }
 
 cmd_test() {
-    local fail=0
+    if ! source_activate; then
+        echo "[warn] activation did not complete; using the ambient Python." >&2
+    fi
     resolve_python
-    for t in tests/test_audit_spine.py tests/test_run_lifecycle.py \
-             tests/test_claim_ui.py tests/test_plan_and_verify.py \
-             tests/test_regressions.py; do
-        [ -f "$t" ] || continue
-        echo "--- $t"
-        "$PY" "$t" 2>&1 | tail -3 || fail=1
-    done
-    return "$fail"
+    "$PY" -m unittest discover -s tests -p 'test_*.py' -v
 }
 
 finalize_index() { cmd_index >/dev/null 2>&1 || true; }

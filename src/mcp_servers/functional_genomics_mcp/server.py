@@ -28,6 +28,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from fastmcp import FastMCP
+from src.mcp_servers.registration import register_tool
 from src.mcp_servers.functional_genomics_mcp.tools import (
     query_gene_essentiality,
     find_essential_genes,
@@ -44,17 +45,17 @@ from src.mcp_servers.functional_genomics_mcp.tools import (
 mcp = FastMCP("Functional Genomics MCP")
 
 # Register CRISPR essentiality tools
-mcp.tool()(query_gene_essentiality)
-mcp.tool()(find_essential_genes)
-mcp.tool()(query_cell_line_dependency)
-mcp.tool()(compare_essentiality_across_diseases)
-mcp.tool()(find_selective_dependencies)
+register_tool(mcp, query_gene_essentiality)
+register_tool(mcp, find_essential_genes)
+register_tool(mcp, query_cell_line_dependency)
+register_tool(mcp, compare_essentiality_across_diseases)
+register_tool(mcp, find_selective_dependencies)
 
 # Register Tahoe drug perturbation tools
-mcp.tool()(query_drug_perturbation)
-mcp.tool()(find_drugs_affecting_gene)
-mcp.tool()(compare_drug_effects)
-mcp.tool()(find_cell_line_selective_effects)
+register_tool(mcp, query_drug_perturbation)
+register_tool(mcp, find_drugs_affecting_gene)
+register_tool(mcp, compare_drug_effects)
+register_tool(mcp, find_cell_line_selective_effects)
 
 if __name__ == "__main__":
     # Run server

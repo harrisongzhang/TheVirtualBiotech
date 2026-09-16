@@ -26,6 +26,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from fastmcp import FastMCP
+from src.mcp_servers.registration import register_tool
 from src.mcp_servers.provenance_mcp.tools import (
     record_claims,
     register_artifact,
@@ -37,10 +38,10 @@ from src.mcp_servers.provenance_mcp.tools import (
 mcp = FastMCP("Provenance MCP")
 
 # Register tools
-mcp.tool()(record_claims)
-mcp.tool()(register_artifact)
-mcp.tool()(write_plan)
-mcp.tool()(list_artifacts)
+register_tool(mcp, record_claims)
+register_tool(mcp, register_artifact)
+register_tool(mcp, write_plan)
+register_tool(mcp, list_artifacts)
 
 if __name__ == "__main__":
     # Run server

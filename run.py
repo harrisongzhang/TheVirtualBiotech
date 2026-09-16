@@ -1,7 +1,7 @@
 """
 The Virtual Biotech — Interactive CLI
 
-Headless interactive CLI for The Virtual Biotech multi-agent system.
+The primary conversational interface for The Virtual Biotech.
 Run any user query through the CSO and specialist pool, with per-turn
 usage tracking and auditable session reports.
 
@@ -13,10 +13,10 @@ import argparse
 import asyncio
 import json
 import os
-import re
 import shutil
 import signal
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -30,7 +30,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.utils.sdk_init_retry import RobustClaudeSDKClient
 from src.utils.cost_tracker import CostTracker
-from src.utils.trace_logger import TraceLogger, parse_agent_transcript, compute_agent_cost
+from src.utils.trace_logger import TraceLogger, agents_in_events, tool_failures
+from src.utils.run_manifest import RunManifest
+from src.utils.session_audit import SessionAudit, scoped_mcp_servers, data_failure_notice
+from src.utils.run_storage import write_json_atomic, write_text_atomic
+from src.utils.runtime_paths import RuntimePaths
+from src.utils.mcp_config import resolve_mcp_servers
+from src.utils.agent_hooks import SecurityConfig, build_security_hooks, build_security_callback
+from src.data.readiness import require_reference_data, DataReadinessError
 
 # =============================================================================
 # Configuration
@@ -43,85 +50,8 @@ REPO_ROOT = Path(__file__).parent
 
 
 def _resolve_mcp_config(mcp_servers: dict) -> dict:
-    """Resolve portable mcp_config.json to absolute paths for this environment.
-
-    Replaces:
-    - "python" command → sys.executable (current conda env Python)
-    - Relative server script paths → absolute paths from REPO_ROOT
-    - "${VAR}" placeholders in server env/headers → environment variable values
-    """
-    resolved = {}
-    for name, cfg in mcp_servers.items():
-        cfg = dict(cfg)
-
-        # Resolve python-based servers
-        if cfg.get("command") in ("python", "python3"):
-            cfg["command"] = sys.executable
-            if cfg.get("args"):
-                cfg["args"] = [
-                    str(REPO_ROOT / a) if (not a.startswith("-") and not Path(a).is_absolute()) else a
-                    for a in cfg["args"]
-                ]
-
-        # Resolve environment variable placeholders in headers
-        if "headers" in cfg:
-            cfg["headers"] = {
-                k: os.environ.get(v.lstrip("${").rstrip("}"), v) if v.startswith("${") else v
-                for k, v in cfg["headers"].items()
-            }
-
-        resolved[name] = cfg
-    return resolved
-
-# =============================================================================
-# Permission Filter (package install blocking only — web access allowed)
-# =============================================================================
-
-async def tool_filter(
-    tool_name: str,
-    input_data: dict,
-    context: dict
-):
-    """
-    Permission callback for interactive sessions.
-
-    Blocks package installation commands only.
-    WebFetch and WebSearch are allowed.
-    """
-    if tool_name == "Bash":
-        command = input_data.get("command", "")
-
-        prohibited_patterns = [
-            (r'\bpip\s+install\b', 'pip install'),
-            (r'\bpip3\s+install\b', 'pip3 install'),
-            (r'\bpython\s+-m\s+pip\s+install\b', 'python -m pip install'),
-            (r'\bconda\s+install\b', 'conda install'),
-            (r'\bapt-get\s+install\b', 'apt-get install'),
-            (r'\byum\s+install\b', 'yum install'),
-            (r'\bdnf\s+install\b', 'dnf install'),
-            (r'\bnpm\s+install\b', 'npm install'),
-            (r'\bnpm\s+i\b', 'npm i'),
-            (r'\byarn\s+add\b', 'yarn add'),
-            (r'\bbrew\s+install\b', 'brew install'),
-            (r'\bgem\s+install\b', 'gem install'),
-            (r'\bcargo\s+install\b', 'cargo install'),
-            (r'\bpoetry\s+add\b', 'poetry add'),
-            (r'\bpipenv\s+install\b', 'pipenv install'),
-        ]
-
-        for pattern, name in prohibited_patterns:
-            if re.search(pattern, command, re.IGNORECASE):
-                print(f"[SECURITY] Blocked package installation attempt: {name}")
-                return {
-                    "behavior": "deny",
-                    "message": f"Package installation is prohibited. Command blocked: '{name}'",
-                    "interrupt": True
-                }
-
-    return {
-        "behavior": "allow",
-        "updatedInput": input_data
-    }
+    """Resolve portable child commands and environment values for this checkout."""
+    return resolve_mcp_servers(mcp_servers, REPO_ROOT)
 
 # =============================================================================
 # Prompt Loading
@@ -183,248 +113,7 @@ def load_prompts():
 # Specialist Agent Builder
 # =============================================================================
 
-def build_specialist_agents(prompts, workspace_dir: str = None):
-    """Build flat pool of all specialist agents.
-
-    Args:
-        prompts: Dictionary of loaded system prompts
-        workspace_dir: Optional workspace directory path to inject into prompts.
-    """
-    from claude_agent_sdk import AgentDefinition
-
-    agents = {}
-
-    if workspace_dir:
-        workspace_instruction = f"""
-IMPORTANT: All file operations (Write, Edit, Bash output files) MUST use this workspace directory:
-{workspace_dir}
-
-When writing files, always use absolute paths starting with the workspace directory above.
-Example: {workspace_dir}/analysis_results.parquet
-
-"""
-    else:
-        workspace_instruction = ""
-
-    # TARGET ID DIVISION
-    agents['genomics-analyst'] = AgentDefinition(
-        description='[Target ID] Genetic evidence: GWAS, L2G predictions, QTL colocalization, target tractability, druggability.',
-        prompt=workspace_instruction + prompts['genomics'],
-        tools=[
-            'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'TodoWrite', 'Skill', 'NotebookEdit',
-            'mcp__genetics__query_gwas_associations', 'mcp__genetics__query_l2g_predictions',
-            'mcp__genetics__get_credible_sets', 'mcp__genetics__get_qtl_colocalization',
-            'mcp__genetics__convert_rsid_to_variant_id', 'mcp__genetics__get_variant_annotation',
-            'mcp__genetics__get_study_metadata', 'mcp__genetics__query_regulatory_regions',
-            'mcp__genetics__query_colocalisation', 'mcp__genetics__get_colocalisation_by_chromosome',
-            'mcp__target__get_target_info', 'mcp__target__search_targets_by_name',
-            'mcp__target__get_target_tractability', 'mcp__target__get_target_prioritisation_scores',
-            'mcp__target__prioritize_targets', 'mcp__target__get_target_safety_profile',
-            'mcp__disease__get_disease_info', 'mcp__disease__search_diseases_by_name',
-        ],
-        model='inherit',
-        effort='high',
-        background=True,
-        memory='project',
-    )
-
-    agents['functional-genomics-analyst'] = AgentDefinition(
-        description='[Target ID] CRISPR essentiality, DepMap dependency, drug perturbation, cancer selectivity. CANCER ONLY.',
-        prompt=workspace_instruction + prompts['functional_genomics'],
-        tools=[
-            'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'TodoWrite', 'Skill', 'NotebookEdit',
-            'mcp__functional_genomics__query_gene_essentiality',
-            'mcp__functional_genomics__find_essential_genes',
-            'mcp__functional_genomics__query_cell_line_dependency',
-            'mcp__functional_genomics__compare_essentiality_across_diseases',
-            'mcp__functional_genomics__find_selective_dependencies',
-            'mcp__functional_genomics__query_drug_perturbation',
-            'mcp__functional_genomics__find_drugs_affecting_gene',
-            'mcp__functional_genomics__compare_drug_effects',
-            'mcp__functional_genomics__find_cell_line_selective_effects',
-            'mcp__target__get_target_info', 'mcp__target__search_targets_by_name',
-        ],
-        model='inherit',
-        effort='high',
-        background=True,
-        memory='project',
-    )
-
-    agents['single-cell-analyst'] = AgentDefinition(
-        description='[Target ID] Single-cell RNA-seq: cell type expression, differential expression, disease biology, CELLxGENE Census.',
-        prompt=workspace_instruction + prompts['single_cell'],
-        tools=[
-            'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'TodoWrite', 'Skill', 'NotebookEdit',
-            'mcp__single_cell__get_census_info',
-            'mcp__single_cell__list_metadata_values',
-            'mcp__single_cell__search_genes',
-            'mcp__single_cell__query_cell_metadata',
-            'mcp__single_cell__get_anndata',
-            'mcp__single_cell__count_cells',
-            'mcp__target__get_target_info', 'mcp__target__search_targets_by_name',
-            'mcp__expression__list_available_tissues',
-            'mcp__expression__query_expression_by_gene',
-            'mcp__expression__query_expression_by_tissue',
-            'mcp__expression__compare_expression_across_tissues',
-            'mcp__expression__find_tissue_specific_genes',
-            'mcp__expression__search_biosample_ontology',
-        ],
-        model='inherit',
-        effort='high',
-        background=True,
-        memory='project',
-    )
-
-    # TARGET SAFETY & CLINICAL OFFICERS
-    agents['fda-safety-officer'] = AgentDefinition(
-        description='[Target Safety & Clinical Officers] FDA regulatory safety: drug warnings, adverse events, target liabilities, mouse phenotypes, risk-benefit.',
-        prompt=workspace_instruction + prompts['fda_safety'],
-        tools=[
-            'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'TodoWrite', 'Skill', 'NotebookEdit',
-            'mcp__drug__search_known_drugs', 'mcp__drug__get_drug_warnings',
-            'mcp__drug__get_drug_indications', 'mcp__drug__get_drug_mechanisms',
-            'mcp__target__get_target_info', 'mcp__target__search_targets_by_name',
-            'mcp__target__get_target_safety_profile', 'mcp__target__get_mouse_phenotype',
-            'mcp__target__get_pharmacogenomics', 'mcp__target__get_homologues',
-        ],
-        model='inherit',
-        effort='high',
-        background=True,
-        memory='project',
-    )
-
-    agents['bio-pathways-ppi-analyst'] = AgentDefinition(
-        description='[Target Safety] Pathway context and PPI networks: Reactome pathways, GO annotations, protein interactions, network-based safety.',
-        prompt=workspace_instruction + prompts['bio_pathways_ppi'],
-        tools=[
-            'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'TodoWrite', 'Skill', 'NotebookEdit',
-            'mcp__pathway__get_gene_pathways', 'mcp__pathway__search_pathways',
-            'mcp__pathway__get_gene_ontology', 'mcp__pathway__search_go_terms',
-            'mcp__pathway__find_genes_in_pathway', 'mcp__pathway__get_pathway_enrichment',
-            'mcp__pathway__get_go_enrichment', 'mcp__pathway__get_go_term_info',
-            'mcp__pathway__get_pathway_info',
-            'mcp__interaction__get_interactions', 'mcp__interaction__get_interaction_evidence',
-            'mcp__target__get_target_info', 'mcp__target__search_targets_by_name',
-        ],
-        model='inherit',
-        effort='high',
-        background=True,
-        memory='project',
-    )
-
-    # CLINICAL OFFICERS DIVISION
-    agents['clinical-trialist'] = AgentDefinition(
-        description='[Clinical Officers] Clinical trial data extraction: ClinicalTrials.gov, cBioPortal cancer genomics, trial outcomes, clinical precedence.',
-        prompt=workspace_instruction + prompts['clinical_trialist'],
-        tools=[
-            'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'TodoWrite', 'Skill', 'NotebookEdit',
-            'mcp__clinicaltrials__get_clinical_trial_details', 'mcp__clinicaltrials__clear_trial_cache',
-            'mcp__clinicaltrials__get_all_cancer_types', 'mcp__clinicaltrials__search_studies',
-            'mcp__clinicaltrials__get_study_details', 'mcp__clinicaltrials__get_clinical_data',
-            'mcp__drug__search_known_drugs', 'mcp__drug__get_drug_mechanisms',
-            'mcp__drug__get_drug_indications',
-            'mcp__target__get_target_info', 'mcp__target__search_targets_by_name',
-        ],
-        model='inherit',
-        effort='high',
-        background=True,
-        memory='project',
-    )
-
-    # MODALITY SELECTION DIVISION
-    agents['target-biologist'] = AgentDefinition(
-        description='[Modality] Protein structure, target biology: druggability, binding sites, localization, mechanism, pathway context.',
-        prompt=workspace_instruction + prompts['target_biologist'],
-        tools=[
-            'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'TodoWrite', 'Skill', 'NotebookEdit',
-            'mcp__target__get_target_info', 'mcp__target__search_targets_by_name',
-            'mcp__target__get_target_tractability', 'mcp__target__get_subcellular_locations',
-            'mcp__target__get_target_class', 'mcp__target__get_chemical_probes',
-            'mcp__target__get_homologues',
-            'mcp__drug__search_known_drugs', 'mcp__drug__get_drug_mechanisms',
-            'mcp__drug__get_drug_indications',
-            'mcp__interaction__get_interactions', 'mcp__interaction__get_interaction_evidence',
-            'mcp__pathway__get_gene_pathways', 'mcp__pathway__get_pathway_info',
-            'mcp__pathway__find_genes_in_pathway',
-            'mcp__expression__list_available_tissues',
-            'mcp__expression__query_expression_by_gene',
-            'mcp__expression__query_expression_by_tissue',
-            'mcp__expression__compare_expression_across_tissues',
-            'mcp__expression__find_tissue_specific_genes',
-            'mcp__expression__search_biosample_ontology',
-        ],
-        model='inherit',
-        effort='high',
-        background=True,
-        memory='project',
-    )
-
-    agents['medchem-pharmacologist'] = AgentDefinition(
-        description='[Modality] Drug development: clinical precedence, modality ranking (top 3), feasibility, timeline, cost.',
-        prompt=workspace_instruction + prompts['medchem'],
-        tools=[
-            'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'TodoWrite', 'Skill', 'NotebookEdit',
-            'mcp__drug__search_known_drugs', 'mcp__drug__get_drug_mechanisms',
-            'mcp__drug__get_drug_indications', 'mcp__drug__get_drug_warnings',
-            'mcp__target__get_target_info', 'mcp__target__search_targets_by_name',
-            'mcp__target__get_target_tractability', 'mcp__target__get_chemical_probes',
-            'mcp__target__get_homologues',
-            'mcp__pathway__get_gene_pathways', 'mcp__pathway__find_genes_in_pathway',
-            'mcp__interaction__get_interactions',
-        ],
-        model='inherit',
-        effort='high',
-        background=True,
-        memory='project',
-    )
-
-    # CHIEF OF STAFF — gets WebSearch
-    agents['chief-of-staff'] = AgentDefinition(
-        description='[Intelligence] Rapid due diligence: field overview, data landscape, recent news/context.',
-        prompt=workspace_instruction + prompts['chief_of_staff'],
-        tools=[
-            'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'TodoWrite',
-            'WebFetch', 'WebSearch',
-        ],
-        model='haiku',
-        memory='project',
-    )
-
-    # SCIENTIFIC REVIEWER
-    agents['scientific-reviewer'] = AgentDefinition(
-        description='[Quality Assurance] Review specialist outputs for scientific rigor, user alignment, logical conclusions.',
-        prompt=workspace_instruction + prompts['scientific_reviewer'],
-        tools=[
-            'Read',
-        ],
-        model='haiku',
-        memory='project',
-    )
-
-    # TRIAL MATCHING SPECIALIST
-    agents['trial-matching-specialist'] = AgentDefinition(
-        description='[Clinical Officers] Patient-to-trial matching: searches ClinicalTrials.gov for recruiting trials, evaluates eligibility criteria against patient profile, produces ranked recommendations.',
-        prompt=workspace_instruction + prompts['trial_matching'],
-        tools=[
-            'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'TodoWrite',
-            'WebSearch', 'WebFetch',
-            'mcp__clinicaltrials__search_clinical_trials',
-            'mcp__clinicaltrials__count_clinical_trials',
-            'mcp__clinicaltrials__get_clinical_trial_details',
-            'mcp__clinicaltrials__get_all_cancer_types',
-            'mcp__clinicaltrials__search_studies',
-            'mcp__drug__search_known_drugs',
-            'mcp__drug__get_drug_mechanisms',
-            'mcp__drug__get_drug_indications',
-            'mcp__drug__get_drug_warnings',
-        ],
-        model='inherit',
-        effort='high',
-        background=True,
-        memory='project',
-    )
-
-    return agents
+from src.agents.registry import build_specialist_agents
 
 
 # =============================================================================
@@ -437,12 +126,13 @@ class Session:
     def __init__(self, model: str = "claude-sonnet-4-5-20250929"):
         self.model = model
         self.start_time = datetime.now()
-        timestamp = self.start_time.strftime("%Y%m%d_%H%M%S")
-        self.session_dir = SESSIONS_DIR / timestamp
-        self.session_dir.mkdir(parents=True, exist_ok=True)
-
-        self.workspace_dir = self.session_dir / "workspace"
-        self.workspace_dir.mkdir(exist_ok=True)
+        timestamp = self.start_time.strftime("%Y%m%d_%H%M%S") + '_' + uuid.uuid4().hex[:8]
+        self.run = RunManifest.create(SESSIONS_DIR, run_id=timestamp, config={
+            'model': model, 'interface': 'interactive', 'audit_required': False,
+        })
+        self.run_id = self.run.run_id
+        self.session_dir = self.run.run_dir
+        self.workspace_dir = self.run.run_dir
 
         # Copy .claude/skills to workspace
         skills_src = Path(__file__).parent / '.claude' / 'skills'
@@ -458,84 +148,22 @@ class Session:
         self.client = None
         self._shutdown_requested = False
         self.trace_logger = TraceLogger()
+        self.audit = SessionAudit(self.run, self.trace_logger)
+        self.runtime_paths = None
 
     def _build_hooks(self):
-        """Build SDK hooks for fine-grained execution tracing.
-
-        Captures sub-agent conversations (via transcript JSONL), tool calls
-        with inputs/outputs, and timing — all routed to self.trace_logger.
-        """
-        from claude_agent_sdk import HookMatcher
-        trace = self.trace_logger
-
-        async def on_subagent_start(hook_input, _matcher, _ctx):
-            try:
-                trace.agent_start(hook_input['agent_id'],
-                                  hook_input['agent_type'])
-            except Exception:
-                pass
-            return {}
-
-        async def on_subagent_stop(hook_input, _matcher, _ctx):
-            try:
-                tp = hook_input.get('agent_transcript_path', '')
-                conv = parse_agent_transcript(tp) if tp else []
-                cost = compute_agent_cost(tp) if tp else None
-                trace.agent_stop(
-                    hook_input['agent_id'], hook_input['agent_type'],
-                    transcript_path=tp, conversation=conv, cost=cost,
-                )
-            except Exception:
-                pass
-            return {}
-
-        async def on_pre_tool(hook_input, _matcher, _ctx):
-            try:
-                trace.tool_start(
-                    hook_input['tool_use_id'], hook_input['tool_name'],
-                    hook_input.get('tool_input', {}),
-                )
-            except Exception:
-                pass
-            return {}
-
-        async def on_post_tool(hook_input, _matcher, _ctx):
-            try:
-                trace.tool_end(
-                    hook_input['tool_use_id'], hook_input['tool_name'],
-                    hook_input.get('tool_input', {}),
-                    hook_input.get('tool_response', ''),
-                )
-            except Exception:
-                pass
-            return {}
-
-        async def on_tool_error(hook_input, _matcher, _ctx):
-            try:
-                trace.tool_error(
-                    hook_input['tool_use_id'], hook_input['tool_name'],
-                    hook_input.get('tool_input', {}),
-                    hook_input.get('error', 'unknown'),
-                )
-            except Exception:
-                pass
-            return {}
-
-        return {
-            'SubagentStart': [HookMatcher(hooks=[on_subagent_start])],
-            'SubagentStop': [HookMatcher(hooks=[on_subagent_stop])],
-            'PreToolUse': [HookMatcher(hooks=[on_pre_tool])],
-            'PostToolUse': [HookMatcher(hooks=[on_post_tool])],
-            'PostToolUseFailure': [HookMatcher(hooks=[on_tool_error])],
-        }
+        return self.audit.build_hooks()
 
     async def initialize(self):
         """Initialize the CSO client."""
+        if self.client is not None:
+            return
         if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
             raise ValueError(
                 "ANTHROPIC_API_KEY is not set. Configure it in the project-root "
                 ".env or export it before starting research."
             )
+        require_reference_data()
         from claude_agent_sdk import ClaudeAgentOptions
         from claude_agent_sdk.types import ThinkingConfigAdaptive
 
@@ -543,9 +171,28 @@ class Session:
         mcp_config_path = Path(__file__).parent / 'mcp_config.json'
         with open(mcp_config_path) as f:
             mcp_config = json.load(f)
-        mcp_servers = _resolve_mcp_config(mcp_config.get('mcpServers', {}))
+        mcp_servers = scoped_mcp_servers(
+            _resolve_mcp_config(mcp_config.get('mcpServers', {})), self.run.run_dir)
 
-        specialist_agents = build_specialist_agents(prompts, workspace_dir=str(self.workspace_dir))
+        specialist_agents = build_specialist_agents(prompts, workspace_dir=str(self.workspace_dir),
+                                                    specialist_model=self.model)
+        # Preserve the CLI's existing research settings when sharing definitions
+        # with the web interface, which grants these specialists extra web tools.
+        specialist_agents['single-cell-analyst'].effort = 'high'
+        for name in ('single-cell-analyst', 'fda-safety-officer', 'clinical-trialist'):
+            specialist_agents[name].tools = [tool for tool in specialist_agents[name].tools
+                                             if tool not in ('WebFetch', 'WebSearch')]
+        self.runtime_paths = RuntimePaths(self.workspace_dir)
+        security = SecurityConfig(
+            workspace_dir=str(self.workspace_dir), app_source_dir=str(REPO_ROOT),
+            extra_read_dirs=[sys.prefix] + [os.environ[key] for key in
+                ('OPEN_TARGETS_DATA_PATH', 'TAHOE_DATA_PATH') if os.environ.get(key)],
+            blocked_read_dirs=[str(REPO_ROOT / name) for name in ('src', '.env', '.git')],
+            runtime_paths=self.runtime_paths,
+        )
+        hooks = build_security_hooks(security)
+        for event, matchers in self._build_hooks().items():
+            hooks.setdefault(event, []).extend(matchers)
 
         cso_options = ClaudeAgentOptions(
             model=self.model,
@@ -555,18 +202,22 @@ class Session:
                 "append": prompts['cso']
             },
             allowed_tools=[
-                'Task', 'TodoWrite',
+                'Task', 'Agent', 'TodoWrite',
                 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash',
                 'Skill', 'NotebookEdit',
                 'WebFetch', 'WebSearch',
+                'mcp__provenance__write_plan', 'mcp__provenance__record_claims',
+                'mcp__provenance__list_artifacts',
             ],
             agents=specialist_agents,
             mcp_servers=mcp_servers,
             max_turns=100,
             cwd=str(self.workspace_dir),
             permission_mode='bypassPermissions',
-            can_use_tool=tool_filter,
-            hooks=self._build_hooks(),
+            can_use_tool=build_security_callback(security),
+            hooks=hooks,
+            session_id=self.runtime_paths.session_id,
+            env={**self.runtime_paths.sdk_env, 'VBT_RUN_DIR': str(self.run.run_dir)},
             thinking=ThinkingConfigAdaptive(type="adaptive"),
             effort="high",
         )
@@ -585,90 +236,91 @@ class Session:
         print(f"[CSO client ready]\n")
 
     async def run_turn(self, user_input: str) -> str:
-        """Execute a single conversation turn.
-
-        Returns:
-            The CSO's response text.
-        """
+        """Send a turn to the existing conversation and save its audit immediately."""
         from claude_agent_sdk import AssistantMessage, TextBlock, ThinkingBlock, ToolUseBlock, ResultMessage
 
+        if self.client is None:
+            await self.initialize()
+        # Recheck before each query: a download or mount can change mid-session.
+        require_reference_data()
         turn_number = len(self.turns) + 1
         turn_start = datetime.now()
-        agents_dispatched = []
-        mcp_tools_used = []
-        response_text = ""
         trace_start = len(self.trace_logger.events)
-
-        await self.client.query(user_input)
-
-        async for msg in self.client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                self.cost_tracker.process_message(msg)
-
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        print(block.text, end="", flush=True)
-                        if response_text and not response_text.endswith('\n'):
-                            response_text += "\n\n"
-                        response_text += block.text
-
-                    elif isinstance(block, ThinkingBlock):
-                        self.trace_logger.thinking(block.thinking)
-
-                    elif isinstance(block, ToolUseBlock):
-                        if block.name == 'Task':
-                            agent = block.input.get('subagent_type', 'unknown')
-                            desc = block.input.get('description', '')
-                            agents_dispatched.append(agent)
-                            print(f"\n\n[Delegating to {agent}: {desc}]\n")
-
-                        elif block.name.startswith('mcp__'):
-                            parts = block.name.split('__')
-                            if len(parts) >= 3:
-                                mcp_tools_used.append(block.name)
-                                print(f"\n[MCP] {parts[1]}: {parts[2]}", end="")
-
-                        elif block.name in ('WebFetch', 'WebSearch'):
-                            print(f"\n[Tool: {block.name}]", end="")
-
-                        elif block.name not in ('TodoWrite',):
-                            print(f"\n[Tool: {block.name}]", end="")
-
-            elif isinstance(msg, ResultMessage):
-                self.cost_tracker.process_result(msg)
-                cumulative_cost = getattr(msg, 'total_cost_usd', 0.0) or 0.0
-                turn_cost = cumulative_cost - self.previous_cumulative_cost
-
-                # Extract execution traces captured during this turn
-                turn_events = self.trace_logger.events_since(trace_start)
-                thinking_traces = self.trace_logger.extract_thinking(turn_events)
-                subagent_traces = self.trace_logger.extract_subagent_traces(turn_events)
-
-                turn_data = {
-                    "turn": turn_number,
-                    "timestamp": turn_start.isoformat(),
-                    "prompt": user_input,
-                    "response": response_text,
-                    "cost_usd": round(turn_cost, 6),
-                    "cumulative_cost_usd": round(cumulative_cost, 6),
-                    "agents_dispatched": agents_dispatched,
-                    "mcp_tools_used": mcp_tools_used,
-                    "response_length_chars": len(response_text),
-                    "thinking_traces": thinking_traces,
-                    "subagent_traces": subagent_traces,
-                }
-                self.turns.append(turn_data)
-                self.previous_cumulative_cost = cumulative_cost
-
-                # Display turn summary banner
-                print(f"\n")
-                agents_str = ", ".join(agents_dispatched) if agents_dispatched else "(none)"
-                print(f"--- Turn {turn_number} ---{''.rjust(38, '-')}")
-                print(f"  Turn cost:    ${turn_cost:.2f}")
-                print(f"  Total so far: ${cumulative_cost:.2f}")
-                print(f"  Agents used:  {agents_str}")
-                print(f"{''.rjust(48, '-')}")
-
+        self.audit.begin_turn(user_input, turn_number)
+        response_text = ""
+        visible_agents, visible_mcp = [], []
+        cumulative_cost = self.previous_cumulative_cost
+        completed = False
+        failure = None
+        try:
+            await self.client.query(user_input)
+            async for msg in self.client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    self.cost_tracker.process_message(msg)
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            print(block.text, end="", flush=True)
+                            if response_text and not response_text.endswith('\n'):
+                                response_text += "\n\n"
+                            response_text += block.text
+                        elif isinstance(block, ThinkingBlock):
+                            self.trace_logger.thinking(block.thinking)
+                        elif isinstance(block, ToolUseBlock):
+                            if block.name in ('Task', 'Agent'):
+                                agent = block.input.get('subagent_type', 'unknown')
+                                visible_agents.append(agent)
+                                print(f"\n\n[Delegating to {agent}: {block.input.get('description', '')}]\n")
+                            elif block.name.startswith('mcp__'):
+                                visible_mcp.append(block.name)
+                                print(f"\n[MCP] {block.name}", end="")
+                            elif block.name != 'TodoWrite':
+                                print(f"\n[Tool: {block.name}]", end="")
+                elif isinstance(msg, ResultMessage):
+                    self.cost_tracker.process_result(msg)
+                    new_cost = getattr(msg, 'total_cost_usd', None)
+                    if new_cost is not None:
+                        cumulative_cost = new_cost
+                    if msg.is_error:
+                        raise RuntimeError(f"Research turn failed: {msg.subtype}")
+                    completed = True
+            if not completed:
+                raise RuntimeError("The response ended before the turn completed.")
+        except BaseException as error:
+            failure = str(error) or type(error).__name__
+            raise
+        finally:
+            events = self.trace_logger.events_since(trace_start)
+            notice = data_failure_notice(events)
+            if failure:
+                notice = (notice + '\n\n' if notice else '') + f"Turn incomplete: {failure}"
+            if notice:
+                print(f"\n\n{notice}")
+                response_text += ('\n\n' if response_text else '') + notice
+            agents = list(dict.fromkeys(agents_in_events(events) + visible_agents))
+            mcp_tools = list(dict.fromkeys([
+                event['tool_name'] for event in events
+                if event['type'] == 'tool_start' and event.get('tool_name', '').startswith('mcp__')
+            ] + visible_mcp))
+            turn_cost = max(0.0, cumulative_cost - self.previous_cumulative_cost)
+            self.turns.append({
+                "turn": turn_number, "timestamp": turn_start.isoformat(),
+                "prompt": user_input, "response": response_text,
+                "status": "completed" if completed and not failure else "interrupted",
+                "cost_usd": round(turn_cost, 6),
+                "cumulative_cost_usd": round(cumulative_cost, 6),
+                "agents_dispatched": agents, "mcp_tools_used": mcp_tools,
+                "tool_failures": tool_failures(events),
+                "response_length_chars": len(response_text),
+                "thinking_traces": self.trace_logger.extract_thinking(events),
+                "subagent_traces": self.trace_logger.extract_subagent_traces(events),
+            })
+            self.previous_cumulative_cost = cumulative_cost
+            self.write_reports(quiet=True)
+            print(f"\n--- Turn {turn_number} ---")
+            print(f"  Turn cost:    ${turn_cost:.2f}")
+            print(f"  Total so far: ${cumulative_cost:.2f}")
+            print(f"  Agents used:  {', '.join(agents) or '(none)'}")
+            print(f"  Audit:        {self.run.data['status']} ({self.session_dir / 'audit.html'})")
         return response_text
 
     def print_summary(self):
@@ -686,8 +338,8 @@ class Session:
                 print(f"    Turn {t['turn']}: ${t['cost_usd']:.2f}  [{agents}]")
         print(f"{'='*50}\n")
 
-    def write_reports(self):
-        """Write session_report.json and transcript.md to session directory."""
+    def write_reports(self, *, quiet=False):
+        """Save the live audit and compatible session reports after each turn."""
         end_time = datetime.now()
 
         # session_report.json
@@ -701,14 +353,15 @@ class Session:
             "turns": self.turns,
         }
         report_path = self.session_dir / "session_report.json"
-        with open(report_path, 'w') as f:
-            json.dump(report, f, indent=2, default=str)
-        print(f"[Written] {report_path}")
+        write_json_atomic(report_path, report)
+        if not quiet:
+            print(f"[Written] {report_path}")
 
         # trace.jsonl — full event log (tool I/O, agent transcripts, reasoning)
         trace_path = self.session_dir / "trace.jsonl"
         self.trace_logger.write_jsonl(trace_path)
-        print(f"[Written] {trace_path} ({len(self.trace_logger.events)} events)")
+        if not quiet:
+            print(f"[Written] {trace_path} ({len(self.trace_logger.events)} events)")
 
         # transcript.md
         lines = [
@@ -753,9 +406,12 @@ class Session:
                 lines.append("")
 
         transcript_path = self.session_dir / "transcript.md"
-        with open(transcript_path, 'w') as f:
-            f.write("\n".join(lines))
-        print(f"[Written] {transcript_path}")
+        write_text_atomic(transcript_path, "\n".join(lines))
+        write_text_atomic(self.session_dir / "logs" / "transcript.md", "\n".join(lines))
+        if not quiet:
+            print(f"[Written] {transcript_path}")
+        self.audit.finish_turn(self.turns, self.previous_cumulative_cost,
+            interrupted=any(t.get("status") == "interrupted" for t in self.turns))
 
     async def run_repl(self):
         """Run the interactive REPL loop."""
@@ -766,7 +422,7 @@ class Session:
         print(f"Workspace:   {self.workspace_dir}")
         print()
         print("Commands:")
-        print("  /done or quit  — end session, write reports")
+        print("  /done or quit  — end session (reports save after every turn)")
         print("  /summary       — print current session summary")
         print("  /help          — show this help")
         print("  Ctrl+C         — graceful shutdown, write reports")
@@ -833,6 +489,8 @@ class Session:
                 print("\nCSO: ", end="", flush=True)
                 try:
                     await self.run_turn(user_input)
+                except DataReadinessError as error:
+                    print(f"\n[Data not ready] {error}")
                 except Exception as e:
                     print(f"\n[ERROR] Turn failed: {e}")
                     import traceback
@@ -840,19 +498,16 @@ class Session:
                     print("[You can try again or type /done to finish.]")
 
         finally:
-            # Always write reports
-            print()
-            self.print_summary()
-            self.write_reports()
-
-            # Disconnect client
-            if self.client:
+            try:
+                print()
+                self.print_summary()
+                self.write_reports()
+            finally:
                 try:
-                    await self.client.disconnect()
-                except Exception:
-                    pass
-
-            signal.signal(signal.SIGINT, original_handler)
+                    if self.client:
+                        await self.client.disconnect()
+                finally:
+                    signal.signal(signal.SIGINT, original_handler)
 
 
 # =============================================================================
@@ -874,8 +529,13 @@ def main():
     from run_vbt import _require_api_key
     _require_api_key()
     session = Session(model=args.model)
-    asyncio.run(session.run_repl())
+    try:
+        asyncio.run(session.run_repl())
+    except (DataReadinessError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

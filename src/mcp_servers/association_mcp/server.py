@@ -28,6 +28,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from fastmcp import FastMCP
+from src.mcp_servers.registration import register_tool
 from src.mcp_servers.association_mcp.tools import (
     query_associations,
     get_associations_for_disease,
@@ -46,17 +47,17 @@ from src.mcp_servers.association_mcp.tools import (
 mcp = FastMCP("Association MCP")
 
 # Register tools
-mcp.tool()(query_associations)
-mcp.tool()(get_associations_for_disease)
-mcp.tool()(get_associations_for_target)
-mcp.tool()(compare_direct_indirect)
-mcp.tool()(filter_by_datatype)
-mcp.tool()(filter_by_datasource)
-mcp.tool()(query_evidence)
-mcp.tool()(get_evidence_by_publication)
-mcp.tool()(search_literature)
-mcp.tool()(find_similar_entities)      # NEW: Literature vector similarity search
-mcp.tool()(compute_entity_similarity)  # NEW: Pairwise entity similarity
+register_tool(mcp, query_associations)
+register_tool(mcp, get_associations_for_disease)
+register_tool(mcp, get_associations_for_target)
+register_tool(mcp, compare_direct_indirect)
+register_tool(mcp, filter_by_datatype)
+register_tool(mcp, filter_by_datasource)
+register_tool(mcp, query_evidence)
+register_tool(mcp, get_evidence_by_publication)
+register_tool(mcp, search_literature)
+register_tool(mcp, find_similar_entities)      # NEW: Literature vector similarity search
+register_tool(mcp, compute_entity_similarity)  # NEW: Pairwise entity similarity
 
 if __name__ == "__main__":
     # Run server

@@ -10,7 +10,7 @@ selection, and analysis of clinical translation failure. It is designed for
 human-guided research and decision support, with users setting the scientific
 question and steering follow-up analyses.
 
-The **interactive CLI is the recommended starting point**. For a first
+The **conversational CLI is the recommended interface**. For a first
 installation, follow [Setup](#setup) below, then continue to
 [Running the CLI](#running-the-cli).
 
@@ -170,10 +170,12 @@ empty values.
 | `ANTHROPIC_API_KEY` | Model access | Required for live research |
 | `OPEN_TARGETS_DATA_PATH` | Downloaded Open Targets directory; read-only | Required |
 | `TAHOE_DATA_PATH` | Prepared Tahoe directory; read-only | Optional |
-| `MCP_OUTPUT_DIR` | Writable directory for MCP outputs, such as query-result Parquet files | Created automatically; defaults to `data/` in the project root |
+| `MCP_OUTPUT_DIR` | Output directory for standalone MCP tools | Defaults to `data/` in the project root; research sessions use their own output directory |
 
-The data directories contain reference files you download. `MCP_OUTPUT_DIR`
-starts empty and is created and populated by the app. Optional `.env` entries:
+The data directories contain reference files you download. Output directories
+start empty and are created as needed. During a research session, MCP query
+results are saved under `work/_mcp/data/processed/` in that session's directory.
+Optional `.env` entries:
 
 ```dotenv
 TAHOE_DATA_PATH="/absolute/path/to/tahoe-prepared"
@@ -253,44 +255,19 @@ Evaluate PCSK9 as a target for lowering LDL cholesterol, including genetic evide
 ```
 
 If the CSO asks clarifying questions, answer them at the same prompt to set
-the scope of the analysis. Ask follow-up questions in the same session, then
-type `/done` to save and exit.
+the scope of the analysis. Keep the CLI open to continue the conversation;
+follow-up questions use the context from earlier turns. For example:
 
-For a single query that exits when finished:
-
-```bash
-python run_vbt.py run "Evaluate PCSK9 as a target for lowering LDL cholesterol, including genetic evidence and existing therapies."
+```text
+How does its genetic evidence compare with LPA for the same indication?
 ```
 
-Both examples use the default model.
-
-| Interface | Command | Output directory |
-|---|---|---|
-| Interactive terminal (recommended) | `python run.py` | `sessions/<timestamp>/` |
-| Headless question or conversation | `python run_vbt.py run "<query>"` | `runs/<RUN_ID>/` |
-| Headless with Bash activation | `./run.sh run "<query>"` | `runs/<RUN_ID>/` |
-
-Use the Python entry points after activating the environment and configuring
-MCP servers in [setup](#setup). `run.sh` handles activation and MCP configuration
-automatically.
-
-### Choose a model
-
-Model selection is optional. Both CLIs accept model IDs and quoted display labels:
-
-```bash
-python run.py --model claude-opus-4-6
-./run.sh run --model claude-opus-4-6 "Evaluate PCSK9 as a target for lowering LDL cholesterol, including genetic evidence and existing therapies."
-# --model "Opus 4.6" selects the same model.
-```
-
-The default is `claude-sonnet-4-5-20250929`. The chief-of-staff and
-scientific-reviewer always use Haiku. To see the labels and options, use
-`python run.py --help` or `python run_vbt.py run --help`.
-
-Unrecognized labels fail immediately. Model IDs beginning with `claude-` are
-forwarded unchanged; Anthropic returns an API error for unavailable models.
-See the [model catalog](https://platform.claude.com/docs/en/about-claude/models/overview).
+The CLI checks the required Open Targets files before each research turn.
+If a download is incomplete or files are missing, that turn is stopped before
+a model request. Finish or repair the download, run
+`python tools/doctor.py --skip-api-key`, then retry the prompt in the same session.
+If a data source remains unavailable during analysis, a warning is shown with
+the answer and recorded in the session's audit.
 
 ### Interactive sessions
 
@@ -312,21 +289,44 @@ including genetic evidence and existing therapies.
 | `/help` | Show available commands |
 | `Ctrl+C` | Exit gracefully and save output files |
 
-Sessions write `session_report.json`, `transcript.md`, `trace.jsonl`, and agent
-files under `workspace/` inside `sessions/<timestamp>/`.
-
 For a short launch reference after installation, see the
 [interactive CLI quickstart](QUICKSTART.md).
 
-### Headless runs
+### Session records and verification
 
-Pass one quoted argument per conversation turn, or use `-f questions.txt` for
-one turn per nonempty line. The runner prints the run ID and paths to its
-`README.md` and `audit.html`.
+The terminal prints the session directory at startup. Records are saved after
+each turn, including follow-up questions, specialist activity, costs, and evidence:
 
-Research artifacts go in `runs/<RUN_ID>/work/`; logs and evidence have their own
-subdirectories. Check the recorded artifacts with `./run.sh verify <RUN_ID>`.
-Headless and web runs share the `runs/` layout; interactive sessions use `sessions/`.
+```text
+sessions/<SESSION_ID>/
+├── MANIFEST.json                  # artifact hashes and run configuration
+├── session_report.json            # interactive session's per-turn summary
+├── README.md                      # run summary and artifact index
+├── audit.html                     # evidence and execution report
+├── inputs/                        # query.txt and plan.json
+├── work/<agent>/                  # scripts, data, figures, tables and reports
+├── work/_mcp/data/processed/       # MCP query outputs
+├── logs/                          # transcript.md, cost_report.json, trace.jsonl
+├── evidence/                      # claims.json and provenance.json
+└── report/FINAL_REPORT.md          # CSO responses across conversation turns
+```
+
+The CLI also writes `transcript.md` and `trace.jsonl` at the session root for
+tools that read the earlier session layout.
+
+Open the session's `README.md` or `audit.html` to review it. To check the saved
+record, replace `<SESSION_ID>` below with the directory name printed by the CLI:
+
+```bash
+python run_vbt.py verify "sessions/<SESSION_ID>"
+```
+
+Verification reports **artifact integrity** and **evidence coverage** separately.
+Each research turn must link its findings to filed claims.
+A research run with no filed claims, missing or stale evidence links, or
+unresolved data errors is **INCOMPLETE**, even if every file hash matches.
+Verification checks the recorded support for an answer; it does not establish
+scientific correctness or independently verify external citations.
 
 <details>
 <summary>Audit tooling without a model key</summary>
@@ -341,14 +341,18 @@ python3 tests/test_run_lifecycle.py
 python3 tests/test_claim_ui.py
 python3 tests/test_plan_and_verify.py
 python3 tests/test_regressions.py
+python3 tests/test_audit_coverage.py
+python3 tests/test_live_provenance.py
 python3 tools/audit_run.py /path/to/old-session -o ./audits
-python3 run_vbt.py verify <RUN_ID>
+python3 run_vbt.py verify "<RUN_ID>"
 ```
 
 The retrofit tool builds `audits/<id>/audit.html` from an old session's
-`trace.jsonl`. Sessions without that trace cannot be audited. Some tests need
-a recorded session and skip when it is absent; set `VBT_TEST_SESSION` to a
-session directory to enable them. In the application environment, run the
+`trace.jsonl`. Without a trace, it can inventory files but cannot recover
+specialist attribution or the execution history. It cannot reconstruct claims
+that were never filed. Some tests need a recorded session and skip when it is
+absent; set `VBT_TEST_SESSION` to a session directory to enable them.
+In the application environment, run the
 complete suite with `python -m unittest discover -s tests`.
 
 `verify` re-hashes artifacts and re-resolves claims. Adding `--rerun` also
@@ -363,6 +367,52 @@ See [the run manifest](src/utils/run_manifest.py) for the output layout and
 for how the CSO records plans, evidence, and artifacts.
 
 </details>
+
+### Choose a model
+
+Model selection is optional. Both CLIs accept model IDs and quoted display labels:
+
+```bash
+python run.py --model claude-opus-4-6
+# --model "Opus 4.6" selects the same model.
+```
+
+The default is `claude-sonnet-4-5-20250929`. The chief-of-staff and
+scientific-reviewer always use Haiku. To see the labels and options, use
+`python run.py --help` or `python run_vbt.py run --help`.
+
+Unrecognized labels fail immediately. Model IDs beginning with `claude-` are
+forwarded unchanged; Anthropic returns an API error for unavailable models.
+See the [model catalog](https://platform.claude.com/docs/en/about-claude/models/overview).
+
+### Headless runs
+
+Use the headless runner for scripted queries that exit when finished:
+
+```bash
+python run_vbt.py run "Evaluate PCSK9 as a target for lowering LDL cholesterol, including genetic evidence and existing therapies."
+```
+
+This uses the default model. Pass one quoted argument per conversation turn,
+or use `-f questions.txt` for one turn per nonempty line. The runner prints the
+run ID and paths to its `README.md` and `audit.html`.
+
+| Interface | Command | Output directory |
+|---|---|---|
+| Conversational CLI (recommended) | `python run.py` | `sessions/<SESSION_ID>/` |
+| Headless question or conversation | `python run_vbt.py run "<query>"` | `runs/<RUN_ID>/` |
+| Headless with Bash activation | `./run.sh run "<query>"` | `runs/<RUN_ID>/` |
+
+Use the Python entry points after activating the environment and configuring
+MCP servers in [setup](#setup). `run.sh` handles activation and MCP configuration
+automatically. For example, with an explicit model:
+
+```bash
+./run.sh run --model claude-opus-4-6 "Evaluate PCSK9 as a target for lowering LDL cholesterol, including genetic evidence and existing therapies."
+```
+
+Headless and web runs use the same internal directory layout as interactive
+sessions, under `runs/<RUN_ID>/`. Check them with `./run.sh verify <RUN_ID>`.
 
 ## Running Gradio
 
