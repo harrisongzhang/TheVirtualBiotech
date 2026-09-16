@@ -1,5 +1,12 @@
 # The Virtual Biotech
 
+<p align="center">
+  <strong>
+    To run demo queries directly on our web interface, visit
+    <a href="https://virtualbiotech.ai">virtualbiotech.ai</a>.
+  </strong>
+</p>
+
 The Virtual Biotech is a multi-agent AI framework for therapeutic discovery
 and development. It models a cross-functional therapeutic research organization:
 a virtual Chief Scientific Officer (CSO) coordinates scientist agents that
