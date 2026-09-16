@@ -204,6 +204,9 @@ class InteractiveSessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(Path(config["env"]["MCP_OUTPUT_DIR"]).is_relative_to(session.session_dir))
         self.assertIn("mcp__provenance__write_plan", options.allowed_tools)
         self.assertIn("mcp__provenance__record_claims", options.allowed_tools)
+        self.assertEqual(options.agents["single-cell-analyst"].effort, "high")
+        for name in ("single-cell-analyst", "fda-safety-officer", "clinical-trialist"):
+            self.assertTrue({"WebFetch", "WebSearch"}.isdisjoint(options.agents[name].tools))
         for specialist in options.agents.values():
             if "Write" in specialist.tools:
                 self.assertIn("mcp__provenance__register_artifact", specialist.tools)

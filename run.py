@@ -176,6 +176,12 @@ class Session:
 
         specialist_agents = build_specialist_agents(prompts, workspace_dir=str(self.workspace_dir),
                                                     specialist_model=self.model)
+        # Preserve the CLI's existing research settings when sharing definitions
+        # with the web interface, which grants these specialists extra web tools.
+        specialist_agents['single-cell-analyst'].effort = 'high'
+        for name in ('single-cell-analyst', 'fda-safety-officer', 'clinical-trialist'):
+            specialist_agents[name].tools = [tool for tool in specialist_agents[name].tools
+                                             if tool not in ('WebFetch', 'WebSearch')]
         self.runtime_paths = RuntimePaths(self.workspace_dir)
         security = SecurityConfig(
             workspace_dir=str(self.workspace_dir), app_source_dir=str(REPO_ROOT),
