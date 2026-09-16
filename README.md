@@ -20,6 +20,25 @@ installation, follow [Setup](#setup) below, then continue to
 
 ## Setup
 
+### System requirements
+
+For the core installation with Open Targets data, plan for:
+
+| Resource | Requirement or recommendation |
+|---|---|
+| CPU | At least 4 CPU cores |
+| Storage | About 40 GB for the core installation, plus space for caches and research outputs |
+| Memory | 16 GB RAM recommended; large or concurrent analyses can need more |
+| GPU | Not required for the standard CLI workflow; language models run through an API |
+| Network | Internet access for installation, model requests, and remote data sources |
+
+The reference data and Conda environment together occupy about 37 GB. Leave
+additional space for installation caches, research outputs, and large single-cell
+downloads. The RAM recommendation is based on
+[measured query memory use](#measured-resource-use).
+Optional Tahoe data requires about 83 GiB for the source download alone, plus
+space for prepared files; see the [Tahoe setup guide](docs/TAHOE_SETUP.md).
+
 ### 1. Create the conda environment
 
 Install Git and [Miniforge (Conda)](https://github.com/conda-forge/miniforge#install).
@@ -117,7 +136,9 @@ to verify completed files on subsequent runs.
 
 </details>
 
-Resource use measured on Linux x86_64 on 15 September 2026:
+#### Measured resource use
+
+Measured on Linux x86_64 on 15 September 2026:
 
 | Resource | Measurement |
 |---|---|
