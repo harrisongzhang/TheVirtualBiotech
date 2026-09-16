@@ -32,10 +32,8 @@ For the core installation with Open Targets data, plan for:
 | GPU | Not required for the standard CLI workflow; language models run through an API |
 | Network | Internet access for installation, model requests, and remote data sources |
 
-The reference data and Conda environment together occupy about 37 GB. Leave
-additional space for installation caches, research outputs, and large single-cell
-downloads. The RAM recommendation is based on
-[measured query memory use](#measured-resource-use).
+Leave additional space for installation caches, research outputs, and large
+single-cell downloads.
 Optional Tahoe data requires about 83 GiB for the source download alone, plus
 space for prepared files; see the [Tahoe setup guide](docs/TAHOE_SETUP.md).
 
@@ -135,23 +133,6 @@ It records sizes and SHA-256 hashes in a local manifest, then uses that manifest
 to verify completed files on subsequent runs.
 
 </details>
-
-#### Measured resource use
-
-Measured on Linux x86_64 on 15 September 2026:
-
-| Resource | Measurement |
-|---|---|
-| Open Targets archive | 28.99 GiB |
-| Installed Conda environment | About 5.4 GiB |
-| Largest process in target/DepMap test queries | About 9.8 GiB resident RAM |
-| Download time | About 28 minutes, with 8 then 16 workers, including an interruption/resume test |
-
-Allow additional disk space for package caches and research outputs. Loaded
-tables can use substantially more RAM than their compressed files, and
-concurrent specialist queries increase memory use. These measurements describe
-the test workload; requirements and download times depend on the machine,
-connection, and analysis.
 
 #### Tahoe-100M (optional)
 
@@ -313,8 +294,16 @@ See the [model catalog](https://platform.claude.com/docs/en/about-claude/models/
 
 ### Interactive sessions
 
-Run `python run.py`, then type a question at the `You:` prompt. For multi-line
-input, enter a line containing `"""`, your question, and another `"""` line.
+Run `python run.py`, then type a question at the `You:` prompt. For multiline
+input, enter `"""` on its own line, type or paste your prompt, then enter another
+`"""` line to submit it as one message:
+
+```text
+"""
+Evaluate PCSK9 as a target for lowering LDL cholesterol,
+including genetic evidence and existing therapies.
+"""
+```
 
 | Command | Action |
 |---|---|
