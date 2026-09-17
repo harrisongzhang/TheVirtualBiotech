@@ -7,6 +7,13 @@
   </strong>
 </p>
 
+<p align="center">
+  <strong>
+    To ask questions about the paper, chat with our paper agent at
+    <a href="https://paper2agent.ai/virtualbiotech">paper2agent.ai/virtualbiotech</a>.
+  </strong>
+</p>
+
 The Virtual Biotech is a multi-agent AI framework for therapeutic discovery
 and development. It models a cross-functional therapeutic research organization:
 a virtual Chief Scientific Officer (CSO) coordinates scientist agents that
