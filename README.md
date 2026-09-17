@@ -235,10 +235,11 @@ VBT_ENV=/absolute/path/to/env ./run.sh doctor --skip-api-key --smoke
 ```
 
 For custom activation, see the `activate.local.sh` override described in
-`activate.sh`. Optionally, run the regression tests without model requests:
+`activate.sh`. Optionally, run the regression tests without model requests.
+The environment includes pytest:
 
 ```bash
-python -m unittest discover -s tests
+python -m pytest -q
 ```
 
 Once setup checks pass and your API key is configured, continue below to run
@@ -360,7 +361,7 @@ specialist attribution or the execution history. It cannot reconstruct claims
 that were never filed. Some tests need a recorded session and skip when it is
 absent; set `VBT_TEST_SESSION` to a session directory to enable them.
 In the application environment, run the
-complete suite with `python -m unittest discover -s tests`.
+complete suite with `python -m pytest -q`.
 
 `verify` re-hashes artifacts and re-resolves claims. Adding `--rerun` also
 executes the recorded analysis code and compares outputs by filename; it does
