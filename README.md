@@ -566,6 +566,24 @@ not depend on executables on the host's `PATH` or in its `$HOME`.
 apptainer test vbt.sif
 ```
 
+## Clinical trial data
+
+The [clinical trial data folder](datasets/clinical_trials/) contains two files:
+
+- [`chembl_clinical_nct_data.parquet`](datasets/clinical_trials/chembl_clinical_nct_data.parquet):
+  488,361 drug–target–disease mappings across 76,925 trials, derived from Open Targets.
+- [`clinical_trial_labels_reconciled.csv`](datasets/clinical_trials/clinical_trial_labels_reconciled.csv):
+  reconciled annotations for 56,707 completed, terminated, withdrawn, or suspended
+  trials, including endpoint outcomes, phase progression, reasons for stopping,
+  serious adverse event percentages, and source references.
+
+Join the files on `nct_id`. The mapping file can contain multiple rows per trial;
+the labels file has one row per trial.
+
+Open Targets Platform data are released under
+[CC0 1.0](https://platform-docs.opentargets.org/licence), which permits redistribution
+and modification.
+
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+The code is distributed under the MIT License. See [LICENSE](LICENSE) for details.

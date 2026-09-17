@@ -64,6 +64,7 @@ Thumbs.db
 *.h5
 *.hdf5
 *.parquet
+!/datasets/clinical_trials/chembl_clinical_nct_data.parquet
 
 # Workspace / session outputs (generated)
 workspace/
