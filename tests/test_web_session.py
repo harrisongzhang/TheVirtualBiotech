@@ -15,7 +15,7 @@ sys.path.insert(0, str(REPO))
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from claude_agent_sdk import ResultMessage
+from claude_agent_sdk import AssistantMessage, ResultMessage, ThinkingBlock
 
 import gradio_cso_app as app
 import run_vbt
@@ -68,7 +68,8 @@ class WebSessionTests(unittest.IsolatedAsyncioTestCase):
             RuntimePaths(*args, temp_parent=self.root, **kwargs)))
         self.clients = []
         self.factory = self.enterContext(patch.object(app, "RobustClaudeSDKClient", side_effect=self.make_client))
-        self.enterContext(contextlib.redirect_stdout(io.StringIO()))
+        self.stdout = io.StringIO()
+        self.enterContext(contextlib.redirect_stdout(self.stdout))
         self.enterContext(contextlib.redirect_stderr(io.StringIO()))
 
     def make_client(self, **kwargs):
@@ -99,6 +100,40 @@ class WebSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(verify_run(session.workspace_dir)["ok"])
         self.assertIn("LPA", second[0][-1]["content"])
         self.assertTrue((self.root / "runs" / "INDEX.json").exists())
+        final = (session.workspace_dir / "report/FINAL_REPORT.md").read_text()
+        self.assertIn("Recorded PCSK9 evidence [[claim:C1]]", final)
+        self.assertIn("Comparison with LPA for the same indication [[claim:C2]]", final)
+        self.assertNotIn("cso-thinking", final)
+        self.assertNotIn("Reasoning fixture", final)
+        self.assertNotIn("reasoning-only", final)
+        for turn in session.turns:
+            self.assertEqual(len(turn["thinking_traces"]), 2)
+            self.assertNotIn("Reasoning fixture", turn["response"])
+        self.assertIn("<cso-thinking>", second[0][-1]["content"])
+        self.assertIn("Reasoning fixture", second[0][-1]["content"])
+
+    async def test_result_text_is_saved_when_only_thinking_blocks_were_streamed(self):
+        session = app.session_manager.get_or_create_session("web-test")
+        session.ensure_run("Hello.")
+        await session.initialize()
+        answer = "Hello. What would you like to investigate?"
+
+        async def responses():
+            yield AssistantMessage(content=[
+                ThinkingBlock(thinking="Reasoning fixture.", signature="fixture"),
+            ], model=session.client.options.model)
+            yield ResultMessage(
+                subtype="success", duration_ms=100, duration_api_ms=50, is_error=False,
+                num_turns=1, session_id=session.client.options.session_id,
+                total_cost_usd=0.01, result=answer,
+            )
+
+        with patch.object(session.client, "receive_response", responses):
+            output = await self.message("Hello.")
+        self.assertEqual(session.turns[-1]["response"], answer)
+        self.assertEqual((session.workspace_dir / "report/FINAL_REPORT.md").read_text(), answer)
+        self.assertIn(answer, output[0][-1]["content"])
+        self.assertIn("Reasoning fixture", output[0][-1]["content"])
 
     async def test_sessions_have_private_child_environments(self):
         prior = os.environ.get("VBT_RUN_DIR")
@@ -177,12 +212,16 @@ class WebSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manifest["status"], "interrupted")
         self.assertFalse(verify_run(session.workspace_dir)["ok"])
         self.assertTrue(session._needs_client_reset)
+        final = (session.workspace_dir / "report/FINAL_REPORT.md").read_text()
+        self.assertNotIn("Reasoning fixture", final)
+        self.assertNotIn("cso-thinking", final)
+        self.assertIn("Turn interrupted", final)
 
     async def test_headless_runner_uses_one_client_and_returns_verified_run(self):
         with patch.object(run_vbt, "_app", return_value=app):
             result = await run_vbt._run_turns(
                 ["Evaluate PCSK9.", "Compare its evidence with LPA."],
-                "Sonnet 4.5 (default)", session_id="batch", quiet=True,
+                "Sonnet 4.5 (default)", session_id="batch", quiet=False,
             )
         session = app.session_manager.sessions["batch"]
         self.assertEqual(result, session.workspace_dir)
@@ -191,6 +230,10 @@ class WebSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.clients[0].prompts, ["Evaluate PCSK9.", "Compare its evidence with LPA."])
         self.assertTrue(self.clients[0].disconnected)
         self.assertIsNone(session.client)
+        self.assertIn("Recorded PCSK9 evidence [[claim:C1]]", self.stdout.getvalue())
+        self.assertIn("Comparison with LPA for the same indication [[claim:C2]]", self.stdout.getvalue())
+        self.assertNotIn("Reasoning fixture", self.stdout.getvalue())
+        self.assertNotIn("cso-thinking", self.stdout.getvalue())
 
     async def test_headless_preflight_failure_returns_failure_without_client(self):
         (self.data / "credible_set" / "part.parquet").unlink()
@@ -219,11 +262,14 @@ class WebSessionTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(run_vbt, "_app", return_value=app):
             result = await run_vbt._run_turns(
                 ["Evaluate PCSK9.", "Compare its evidence with LPA."],
-                "Sonnet 4.5 (default)", session_id="batch", quiet=True,
+                "Sonnet 4.5 (default)", session_id="batch", quiet=False,
             )
         self.assertIsNone(result)
         self.assertEqual(self.clients[0].prompts, ["Evaluate PCSK9."])
         self.assertTrue(self.clients[0].disconnected)
+        self.assertIn("Reference data is not ready", self.stdout.getvalue())
+        self.assertNotIn("Reasoning fixture", self.stdout.getvalue())
+        self.assertNotIn("cso-thinking", self.stdout.getvalue())
 
 
 if __name__ == "__main__":

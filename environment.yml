@@ -57,3 +57,5 @@ dependencies:
     - gradio==6.10.0
     - python-dotenv==1.2.2
     - httpx==0.28.1
+    # Test suite
+    - pytest==9.1.1

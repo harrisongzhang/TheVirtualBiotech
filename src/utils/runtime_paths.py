@@ -30,13 +30,20 @@ class RuntimePaths:
         environment = dict(os.environ if env is None else env)
         self.workspace_dir = Path(workspace_dir).resolve()
         self.session_id = str(UUID(session_id)) if session_id else str(uuid4())
-        configured = environment.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
-        self.config_dir = Path(unicodedata.normalize("NFC", configured)).expanduser().resolve()
+        configured = environment.get("CLAUDE_CONFIG_DIR")
+        config_dir = configured or str(Path.home() / ".claude")
+        self.config_dir = Path(unicodedata.normalize("NFC", config_dir)).expanduser().resolve()
         self.temp_dir = Path(tempfile.mkdtemp(prefix="vbt-runtime-", dir=temp_parent)).resolve()
         self.sdk_env = {
-            "CLAUDE_CONFIG_DIR": str(self.config_dir),
             "CLAUDE_CODE_TMPDIR": str(self.temp_dir),
         }
+        # Setting this to ~/.claude also moves the global configuration from
+        # ~/.claude.json to ~/.claude/.claude.json. Preserve the runtime's
+        # default lookup, including existing auth/settings, unless overridden.
+        if configured is not None:
+            self.sdk_env["CLAUDE_CONFIG_DIR"] = str(self.config_dir)
+        config_parent = self.config_dir if configured is not None else Path.home()
+        self.user_config_path = config_parent / ".claude.json"
         # The pinned runtime replaces non-ASCII-alphanumeric characters and
         # hashes names longer than 200 characters. Match the long-name prefix
         # as the SDK does, while still requiring our exact conversation UUID.
@@ -46,7 +53,10 @@ class RuntimePaths:
 
     def covers(self, path: Path) -> bool:
         """Whether a lexical or resolved path enters protected runtime storage."""
-        return any(path.is_relative_to(root) for root in (self.config_dir, self.temp_dir))
+        return any(path.is_relative_to(root) for root in (
+            self.config_dir, self.temp_dir,
+            self.user_config_path.absolute(), self.user_config_path.resolve(),
+        ))
 
     def _project_matches(self, name: str) -> bool:
         if len(self._project_name) <= 200:

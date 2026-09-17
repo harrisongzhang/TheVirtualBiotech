@@ -83,7 +83,8 @@ class RuntimeSecurityTests(unittest.IsolatedAsyncioTestCase):
                 self.workspace, env={"SCRATCH": str(self.root / "scratch")}, temp_parent=self.root,
             )
         self.assertEqual(runtime.config_dir, self.root / "home" / ".claude")
-        self.assertEqual(runtime.sdk_env["CLAUDE_CONFIG_DIR"], str(runtime.config_dir))
+        self.assertNotIn("CLAUDE_CONFIG_DIR", runtime.sdk_env)
+        self.assertEqual(runtime.user_config_path, self.root / "home" / ".claude.json")
         self.assertEqual(runtime.sdk_env["CLAUDE_CODE_TMPDIR"], str(runtime.temp_dir))
         self.assertEqual(runtime.temp_dir.stat().st_mode & 0o777, 0o700)
 
@@ -93,6 +94,14 @@ class RuntimeSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(second.session_id, self.runtime.session_id)
         self.assertNotEqual(second.temp_dir, self.runtime.temp_dir)
         self.assertEqual(dict(os.environ), before)
+
+    def test_empty_explicit_override_keeps_the_existing_normalized_path(self):
+        with patch("src.utils.runtime_paths.Path.home", return_value=self.root / "home"):
+            runtime = RuntimePaths(
+                self.workspace, env={"CLAUDE_CONFIG_DIR": ""}, temp_parent=self.root,
+            )
+        self.assertEqual(runtime.sdk_env["CLAUDE_CONFIG_DIR"], str(runtime.config_dir))
+        self.assertEqual(runtime.user_config_path, runtime.config_dir / ".claude.json")
 
     async def test_spill_read_glob_and_grep_work_in_both_layers(self):
         await self.assert_permission(True, "Read", {"file_path": str(self.spill)})
@@ -163,6 +172,19 @@ class RuntimeSecurityTests(unittest.IsolatedAsyncioTestCase):
             "file_path": str(self.runtime.config_dir / ".credentials.json"),
         }, config=broad_config)
         await self.assert_permission(True, "Read", {"file_path": str(self.spill)}, config=broad_config)
+
+    async def test_default_global_config_stays_private_with_a_broad_read_root(self):
+        with patch("src.utils.runtime_paths.Path.home", return_value=self.root):
+            runtime = RuntimePaths(self.workspace, env={}, temp_parent=self.root)
+        config = SecurityConfig(
+            str(self.workspace), extra_read_dirs=[str(self.root)], runtime_paths=runtime,
+        )
+        for tool, payload in (
+            ("Read", {"file_path": str(self.root / ".claude.json")}),
+            ("Bash", {"command": f"cat '{self.root / '.claude.json'}'"}),
+        ):
+            with self.subTest(tool=tool):
+                await self.assert_permission(False, tool, payload, config=config)
 
     async def test_relative_workspace_paths_and_reference_data_still_work(self):
         (self.workspace / "result.txt").write_text("result")

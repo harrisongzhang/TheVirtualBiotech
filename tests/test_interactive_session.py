@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ThinkingBlock
 from claude_agent_sdk._internal.sessions import _sanitize_path
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny, ToolPermissionContext
 
@@ -120,7 +120,12 @@ class ScriptedResearchClient:
                          else f"Comparison with LPA for the same indication [[claim:C{turn}]].")
         if self.fail_source or not self.file_claims:
             response_text = "A response without filed evidence."
-        yield AssistantMessage(content=[TextBlock(text=response_text)], model=self.options.model)
+        yield AssistantMessage(content=[
+            ThinkingBlock(thinking=f"Reasoning fixture before turn {turn} [[claim:reasoning-only]].",
+                          signature="fixture"),
+            TextBlock(text=response_text),
+            ThinkingBlock(thinking=f"Reasoning fixture after turn {turn}.", signature="fixture"),
+        ], model=self.options.model)
         yield ResultMessage(
             subtype="success", duration_ms=100, duration_api_ms=50, is_error=False,
             num_turns=1, session_id=self.options.session_id, total_cost_usd=0.01 * turn,
@@ -190,6 +195,15 @@ class InteractiveSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("mcp__genetics__query_gwas_associations", second_costs["turns"][1]["mcp_tools_used"])
         self.assertEqual(second_costs["turns"][1]["subagent_traces"][0]["agent_id"], "genetics-2")
         self.assertFalse(client.disconnected)
+        final = (session.session_dir / "report/FINAL_REPORT.md").read_text()
+        self.assertIn("Recorded PCSK9 evidence [[claim:C1]]", final)
+        self.assertIn("Comparison with LPA for the same indication [[claim:C2]]", final)
+        self.assertNotIn("Reasoning fixture", final)
+        self.assertNotIn("reasoning-only", final)
+        self.assertNotIn("Reasoning fixture", self.stdout.getvalue())
+        for turn in second_costs["turns"]:
+            self.assertEqual(len(turn["thinking_traces"]), 2)
+            self.assertNotIn("Reasoning fixture", turn["response"])
 
     async def test_options_scope_runtime_and_mcp_processes_to_the_run(self):
         session = cli.Session()

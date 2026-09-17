@@ -879,6 +879,8 @@ async def process_message(message: str, history: list, session_id: str, model_ke
         trace_start = len(session.trace_logger.events)
         session.audit.begin_turn(message, turn_number)
         response_text = ""
+        # The web view includes collapsible reasoning; saved answers do not.
+        display_text = ""
         mcp_tools_used = []
         cumulative_cost = session.previous_cumulative_cost
         previous_cost = cumulative_cost
@@ -903,11 +905,14 @@ async def process_message(message: str, history: list, session_id: str, model_ke
                             if response_text and not response_text.endswith('\n'):
                                 response_text += "\n\n"
                             response_text += block.text
-                            history[-1]["content"] = _strip_claim_refs(response_text)
+                            if display_text and not display_text.endswith('\n'):
+                                display_text += "\n\n"
+                            display_text += block.text
+                            history[-1]["content"] = _strip_claim_refs(display_text)
                         elif isinstance(block, ThinkingBlock):
                             session.trace_logger.thinking(block.thinking)
-                            response_text += f"\n\n<cso-thinking>{block.thinking}</cso-thinking>\n\n"
-                            history[-1]["content"] = _strip_claim_refs(response_text)
+                            display_text += f"\n\n<cso-thinking>{block.thinking}</cso-thinking>\n\n"
+                            history[-1]["content"] = _strip_claim_refs(display_text)
                         elif isinstance(block, ToolUseBlock):
                             if block.name.startswith('mcp__'):
                                 mcp_tools_used.append(block.name)
@@ -925,6 +930,7 @@ async def process_message(message: str, history: list, session_id: str, model_ke
                     interrupted = bool(msg.is_error)
                     if not response_text and msg.result:
                         response_text = msg.result
+                        display_text += ("\n\n" if display_text else "") + msg.result
                     if interrupted:
                         error_detail = '; '.join(msg.errors or []) or msg.result or 'The model did not complete this turn.'
         except BaseException as error:
@@ -941,10 +947,13 @@ async def process_message(message: str, history: list, session_id: str, model_ke
             warning = data_failure_notice(events)
             if warning:
                 response_text += "\n\n" + warning
+                display_text += "\n\n" + warning
                 session.activity_tracker.add_event("system", "Data source unavailable", warning, "error")
             if interrupted:
                 detail = error_detail or 'The response ended before completion.'
-                response_text += f"\n\nTurn interrupted: {detail} Evidence coverage is incomplete."
+                notice = f"\n\nTurn interrupted: {detail} Evidence coverage is incomplete."
+                response_text += notice
+                display_text += notice
                 session._needs_client_reset = True
             session.turns.append({
                 "turn": turn_number, "timestamp": turn_start.isoformat(),
@@ -972,7 +981,7 @@ async def process_message(message: str, history: list, session_id: str, model_ke
                 session.agent_statuses[agent] = "error" if interrupted else "complete"
             _write_session_cost_report(session)
             _finalize_run(session, interrupted=interrupted)
-            history[-1]["content"] = render_claim_refs(response_text, session.claim_set)
+            history[-1]["content"] = render_claim_refs(display_text, session.claim_set)
 
         yield history, session.activity_tracker.format_markdown(), session_id, session.render_agent_status_bar()
 

@@ -91,9 +91,19 @@ async def _run_turns(turns: list[str], model_key: str, session_id: str = None,
             if last:
                 history = last[0]
                 session_id = last[2]
-                if not quiet and history and history[-1].get("role") == "assistant":
-                    print(history[-1]["content"])
             session = app.session_manager.sessions.get(session_id)
+            if session is not None and len(session.turns) > before and history:
+                # Error recovery can reuse the previous assistant message.
+                # Keep batch history in report form, without web reasoning.
+                history = history[:-1] + [{
+                    "role": "assistant", "content": session.turns[-1]["response"],
+                }]
+            if not quiet:
+                if session is not None and len(session.turns) > before:
+                    print(session.turns[-1]["response"])
+                elif last and history and history[-1].get("role") == "assistant":
+                    # Startup failures have a UI message but no recorded turn.
+                    print(history[-1]["content"])
             if (session is None or len(session.turns) == before
                     or session.turns[-1].get("status") == "interrupted"):
                 print(f"\n[ERROR] Turn {i} did not complete.", file=sys.stderr)
